@@ -125,6 +125,14 @@ def update_status(cond_name, trial_num, pattern, active_buttons, target_button=N
     buttons_label.config(text=f"Active Button(s): {', '.join(btn_texts)}")
     root.update()  # Immediately refresh GUI
 
+def clear_status():
+    """Clears all status text from the GUI."""
+    condition_label.config(text="Condition: ")
+    trial_label.config(text="Trial: ")
+    pattern_label.config(text="Pattern: ")
+    buttons_label.config(text="Active Button(s): ")
+    root.update()
+
 
 # =====================================================
 #                TRIAL PRESENTATION LOGIC
@@ -256,6 +264,7 @@ def start_experiment():
     """Runs the entire experiment sequence (in a background thread)."""
     start_btn.config(state="disabled")  # Prevent re-clicking
     fixation_label.lift()  # Show fixation cross
+    clear_status() # Clear GUI
     root.update()
 
     time.sleep(10)  # 10-second fixation
@@ -270,6 +279,8 @@ def start_experiment():
 
         # Wait 10 seconds before next condition (if not last)
         if cond_idx < len(conditions) - 1:
+            clear_status()      # <-- CLEAR STATUS HERE
+            fixation_label.lift()
             time.sleep(10)
 
     # Experiment done
