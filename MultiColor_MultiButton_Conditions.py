@@ -1,12 +1,13 @@
 """
 ========================================
-Python GUI + Arduino Button Task System
+Python GUI + Arduino Button Task System (Updated)
 ========================================
 
 FUNCTION:
-- Displays a GUI with a start button and fixation cross.
-- Coordinates timing and presentation of trials for 4 executive-function conditions:
-  "Go", "No-Go", "No-Shift", and "Shift".
+- Displays a GUI with a start button, fixation cross, and next-condition button.
+- Coordinates timing and presentation of trials for 8 executive-function conditions:
+  "Go - Feet Apart", "No Go - Feet Apart", "No Shift - Feet Apart", "Shift - Feet Apart",
+  "Go - Feet Together", "No Go - Feet Together", "No Shift - Feet Together", "Shift - Feet Together".
 - Sends commands to Arduino to light up buttons in specific color patterns.
 - Receives button press data from Arduino.
 - Plays beeps between conditions to signal start/end.
@@ -17,8 +18,6 @@ LEDs (NeoPixels): Pins 6–9
 
 DEPENDENCIES:
   pip install pyserial
-
-----------------------------------------
 """
 
 import tkinter as tk
@@ -32,7 +31,6 @@ import winsound  # For beeps on Windows systems
 # =====================================================
 #                ARDUINO SERIAL SETUP
 # =====================================================
-# Adjust COM port to match your Arduino connection
 arduino = serial.Serial('COM4', 115200, timeout=1)
 time.sleep(2)  # Wait 2 seconds for Arduino to reset
 
@@ -52,11 +50,13 @@ fixation_label.lower()  # Hide cross until the task starts
 
 # Start button to begin experiment
 start_btn = tk.Button(root, text="Start", font=("Arial", 20))
-start_btn.pack(pady=20)
+start_btn.pack(pady=10)
 
-# -----------------------------------------------------
+# Next Condition button (grayed out initially)
+next_btn = tk.Button(root, text="Next Condition", font=("Arial", 20), state="disabled")
+next_btn.pack(pady=10)
+
 # Status Frame (shows trial information in real time)
-# -----------------------------------------------------
 status_frame = tk.Frame(root, bg="white")
 status_frame.pack(pady=10, fill="x")
 
@@ -102,23 +102,16 @@ def wait_for_press(timeout_ms, expected_buttons):
     return None
 
 def update_status(cond_name, trial_num, pattern, active_buttons, target_button=None):
-    """
-    Updates the GUI labels to show:
-    - Current condition name
-    - Trial number
-    - Pattern type
-    - Which button(s) are lit, highlighting the target one in brackets [ ]
-    """
+    """Updates the GUI labels with current trial information."""
     condition_label.config(text=f"Condition: {cond_name}")
     trial_label.config(text=f"Trial: {trial_num + 1}")
     pattern_label.config(text=f"Pattern: {pattern}")
 
-    # Convert button indices from 0–3 → 1–4 for readability
     btn_texts = []
     for idx in active_buttons:
         display_idx = idx + 1
         if idx == target_button:
-            btn_texts.append(f"[{display_idx}]")  # Highlight target
+            btn_texts.append(f"[{display_idx}]")
         else:
             btn_texts.append(str(display_idx))
 
@@ -132,7 +125,6 @@ def clear_status():
     pattern_label.config(text="Pattern: ")
     buttons_label.config(text="Active Button(s): ")
     root.update()
-
 
 # =====================================================
 #                TRIAL PRESENTATION LOGIC
@@ -163,11 +155,9 @@ def run_trials(trials, cond_name):
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
             send_arduino(f"GO_BLUE {blue_button}")
 
-            # Wait up to 10s for correct press
             wait_for_press(10000, [blue_button])
-
             last_blue = blue_button
-            time.sleep(3)  # 3-second inter-trial interval
+            time.sleep(3)
 
         # ---------- Stop-Red Pattern ----------
         elif pattern == "STOP_RED":
@@ -178,8 +168,11 @@ def run_trials(trials, cond_name):
             update_status(cond_name, trial_num, pattern, active_buttons)
             send_arduino(f"STOP_RED {red_button}")
 
-            # Light stays on for 10 seconds, no button press expected
-            time.sleep(10)
+            # Wait up to 10 seconds for press
+            press = wait_for_press(10000, [red_button])
+            if press is not None:
+                time.sleep(3)  # only 3s pause if button pressed
+            # else: move to next trial immediately
 
         # ---------- Only-Blue Pattern ----------
         elif pattern == "ONLY_BLUE":
@@ -191,7 +184,6 @@ def run_trials(trials, cond_name):
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
             send_arduino(f"ONLY_BLUE {','.join(map(str, red_buttons + [blue_button]))}")
 
-            # Wait up to 10s for correct blue press
             wait_for_press(10000, [blue_button])
             last_blue = blue_button
             time.sleep(3)
@@ -206,97 +198,101 @@ def run_trials(trials, cond_name):
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=red_button)
             send_arduino(f"ONLY_RED {','.join(map(str, blue_buttons + [red_button]))}")
 
-            # Wait up to 10s for correct red press
             wait_for_press(10000, [red_button])
             last_only_red = red_button
             time.sleep(3)
-
 
 # =====================================================
 #                CONDITION SEQUENCES
 # =====================================================
 
 def build_conditions():
-    """
-    Builds 4 experimental conditions with required randomization rules.
-    Returns a list of 4 lists, each containing trial pattern dictionaries.
-    """
-    conditions = []
+    """Builds 8 conditions with trial lists and random order."""
+    base_conditions = [
+        ("Go - Feet Apart", [{"pattern": "GO_BLUE"} for _ in range(10)]),
+        ("No Go - Feet Apart", [{"pattern": "GO_BLUE"}]*8 + [{"pattern": "STOP_RED"}]*2),
+        ("No Shift - Feet Apart", [{"pattern": "ONLY_BLUE"} for _ in range(10)]),
+        ("Shift - Feet Apart", [{"pattern": "ONLY_BLUE"}]*8 + [{"pattern": "ONLY_RED"}]*2),
+        ("Go - Feet Together", [{"pattern": "GO_BLUE"} for _ in range(10)]),
+        ("No Go - Feet Together", [{"pattern": "GO_BLUE"}]*8 + [{"pattern": "STOP_RED"}]*2),
+        ("No Shift - Feet Together", [{"pattern": "ONLY_BLUE"} for _ in range(10)]),
+        ("Shift - Feet Together", [{"pattern": "ONLY_BLUE"}]*8 + [{"pattern": "ONLY_RED"}]*2),
+    ]
 
-    # --- Condition 1: Go (10 Go-Blue) ---
-    conditions.append([{"pattern": "GO_BLUE"} for _ in range(10)])
+    # Shuffle No-Go and Shift trials to avoid consecutive red buttons
+    for i in [1, 3, 5, 7]:
+        trials = base_conditions[i][1]
+        while True:
+            random.shuffle(trials)
+            consecutive_red = any(
+                (trials[j]["pattern"] in ["STOP_RED","ONLY_RED"]) and
+                (trials[j+1]["pattern"] in ["STOP_RED","ONLY_RED"])
+                for j in range(len(trials)-1)
+            )
+            if not consecutive_red:
+                break
+        base_conditions[i] = (base_conditions[i][0], trials)
 
-    # --- Condition 2: No-Go (8 Go-Blue + 2 Stop-Red, no consecutive reds) ---
-    trials = [{"pattern": "GO_BLUE"}] * 8 + [{"pattern": "STOP_RED"}] * 2
-    while True:
-        random.shuffle(trials)
-        consecutive = any(
-            trials[i]["pattern"] == "STOP_RED" and trials[i + 1]["pattern"] == "STOP_RED"
-            for i in range(len(trials) - 1)
-        )
-        if not consecutive:
-            break
-    conditions.append(trials)
-
-    # --- Condition 3: No-Shift (10 Only-Blue) ---
-    conditions.append([{"pattern": "ONLY_BLUE"} for _ in range(10)])
-
-    # --- Condition 4: Shift (8 Only-Blue + 2 Only-Red, no consecutive reds) ---
-    trials = [{"pattern": "ONLY_BLUE"}] * 8 + [{"pattern": "ONLY_RED"}] * 2
-    while True:
-        random.shuffle(trials)
-        consecutive = any(
-            trials[i]["pattern"] == "ONLY_RED" and trials[i + 1]["pattern"] == "ONLY_RED"
-            for i in range(len(trials) - 1)
-        )
-        if not consecutive:
-            break
-    conditions.append(trials)
-
-    return conditions
-
+    # Randomize order of all 8 conditions
+    random.shuffle(base_conditions)
+    return base_conditions
 
 # =====================================================
 #                EXPERIMENT THREAD
 # =====================================================
 
+current_conditions = []
+current_index = 0  # Track which condition is next
+
 def start_experiment():
-    """Runs the entire experiment sequence (in a background thread)."""
-    start_btn.config(state="disabled")  # Prevent re-clicking
-    fixation_label.lift()  # Show fixation cross
-    clear_status() # Clear GUI
+    """Starts the first condition of the experiment."""
+    global current_conditions, current_index
+    start_btn.config(state="disabled")
+    next_btn.config(state="disabled")
+    fixation_label.lift()
+    clear_status()
     root.update()
 
-    time.sleep(10)  # 10-second fixation
-    beep()  # Start beep
+    time.sleep(2)  # Short fixation before starting
+    beep()
 
-    conditions = build_conditions()
-    cond_names = ["Go", "No-Go", "No-Shift", "Shift"]
+    current_conditions = build_conditions()
+    current_index = 0
 
-    for cond_idx, trials in enumerate(conditions):
-        run_trials(trials, cond_names[cond_idx])
-        beep()  # End-of-condition beep
+    # Run first condition
+    run_current_condition()
 
-        # Wait 10 seconds before next condition (if not last)
-        if cond_idx < len(conditions) - 1:
-            clear_status()      # <-- CLEAR STATUS HERE
-            fixation_label.lift()
-            time.sleep(10)
+def run_current_condition():
+    """Runs the current condition based on current_index."""
+    global current_conditions, current_index
+    if current_index >= len(current_conditions):
+        # All conditions done
+        start_btn.config(state="normal")
+        next_btn.config(state="disabled")
+        fixation_label.lower()
+        return
 
-    # Experiment done
-    start_btn.config(state="normal")
-    fixation_label.lower()  # Hide fixation cross
+    cond_name, trials = current_conditions[current_index]
+    fixation_label.lower()
+    run_trials(trials, cond_name)
+    beep()
 
+    # Enable Next Condition button after condition is done
+    next_btn.config(state="normal")
+
+def next_condition():
+    """Moves to the next condition when button is pressed."""
+    global current_index
+    next_btn.config(state="disabled")
+    current_index += 1
+    run_current_condition()
 
 # =====================================================
-#                BUTTON CALLBACK
+#                BUTTON CALLBACKS
 # =====================================================
 
-def on_start():
-    """Starts the experiment on a new thread so GUI remains responsive."""
-    threading.Thread(target=start_experiment).start()
-
-start_btn.config(command=on_start)
+start_btn.config(command=lambda: threading.Thread(target=start_experiment).start())
+next_btn.config(command=lambda: threading.Thread(target=next_condition).start())
 
 # =====================================================
 #                RUN GUI MAIN LOOP
