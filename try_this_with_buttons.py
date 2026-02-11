@@ -50,6 +50,8 @@ fixation_label.lower()  # Hide cross until the task starts
 # Start button to begin experiment
 start_btn = tk.Button(root, text="Start", font=("Arial", 20))
 start_btn.pack(pady=10)
+stop_btn = tk.Button(root, text="Stop", font=("Arial", 20), state="disabled")
+stop_btn.pack(pady=10)
 
 # Next Condition button (grayed out initially)
 next_btn = tk.Button(root, text="Next Condition", font=("Arial", 20), state="disabled")
@@ -90,9 +92,18 @@ pattern_label.pack(anchor="w")
 buttons_label = tk.Label(status_frame, text="Active Button(s): ", font=("Arial", 14), bg="white")
 buttons_label.pack(anchor="w")
 
-# =====================================================
+
+stop_requested = False
+
+canonical_conditions = []      # Frozen randomized order
+remaining_conditions = []      # Conditions still to run
+current_condition_name = None  # Track active condition# =====================================================
 #                HELPER FUNCTIONS
 # =====================================================
+def stop_experiment():
+    global stop_requested
+    stop_requested = True
+    next_btn.config(state="normal")
 
 def beep():
     """Plays a 500 Hz tone for 500 milliseconds."""
@@ -110,6 +121,8 @@ def wait_for_press(timeout_ms, expected_buttons):
     """
     start_time = time.time()
     while (time.time() - start_time) * 1000 < timeout_ms:
+        if stop_requested:
+          return
         if arduino.in_waiting:
             line = arduino.readline().decode('utf-8').strip()
             if line.startswith("PRESSED"):
@@ -197,6 +210,9 @@ def run_trials(trials, cond_name):
         blue_button = None
         red_button = None
         active_buttons = []
+      
+        if stop_requested:
+          return
 
         # ---------- Go-Blue Pattern ----------
         if pattern == "GO_BLUE":
@@ -311,10 +327,11 @@ def start_experiment():
     time.sleep(2)  # Short fixation before starting
     beep()
 
-    current_conditions = build_conditions()
-    current_index = 0
+    canonical_conditions = build_conditions()
+    remaining_conditions = canonical_conditions.copy()
+    stop_btn.config(state="normal")
 
-    condition_names = [c[0] for c in current_conditions]
+    condition_names = [c[0] for c in canonical_conditions]
     condition_dropdown["values"] = condition_names
     override_var.set(condition_names[0])
 
@@ -326,53 +343,69 @@ def start_experiment():
     run_current_condition()
 
 def run_current_condition():
-    global current_conditions, current_index
+    global remaining_conditions
     global override_condition_name, is_redo_run
+    global stop_requested, current_condition_name
 
-    if current_index >= len(current_conditions):
+    if not remaining_conditions and not override_condition_name:
         start_btn.config(state="normal")
         next_btn.config(state="disabled")
         redo_btn.config(state="disabled")
+        stop_btn.config(state="disabled")
         fixation_label.lower()
         return
 
     # Determine condition source
     if override_condition_name:
         cond_name = override_condition_name
-        trials = next(c[1] for c in current_conditions if c[0] == cond_name)
-        run_type = "REDO"
+        trials = next(c[1] for c in canonical_conditions if c[0] == cond_name)
+        run_type = "REDO/MANUAL"
     else:
-        cond_name, trials = current_conditions[current_index]
+        cond_name, trials = remaining_conditions[0]
         run_type = "CANONICAL"
 
-    # Update GUI (visual repeat indicator)
-    display_name = f"{cond_name} (REPEAT)" if run_type == "REDO" else cond_name
+    current_condition_name = cond_name
+
+    display_name = f"{cond_name} (REPEAT)" if override_condition_name else cond_name
     override_var.set(display_name)
 
     fixation_label.lower()
+    stop_requested = False
 
     print(f"RUNNING CONDITION: {cond_name} | TYPE: {run_type}")
 
     run_trials(trials, cond_name)
+
+    if stop_requested:
+        print("CONDITION STOPPED EARLY")
+        stop_requested = False
+        return
+
     beep()
 
-    # Reset override state AFTER run
+    # If canonical run finished, remove from remaining
+    if not override_condition_name:
+        remaining_conditions.pop(0)
+
+    # If manual selection and condition still in remaining → remove it
+    if override_condition_name:
+        for i, (name, _) in enumerate(remaining_conditions):
+            if name == cond_name:
+                remaining_conditions.pop(i)
+                break
+
     override_condition_name = None
     is_redo_run = False
-
-    # Restore dropdown text
-    override_var.set(current_conditions[current_index][0])
 
     next_btn.config(state="normal")
 
 
 
+
 def next_condition():
-    """Moves to the next condition when button is pressed."""
-    global current_index
     next_btn.config(state="disabled")
-    current_index += 1
-    run_current_condition()
+    threading.Thread(target=run_current_condition).start()
+
 
 # =====================================================
 #                BUTTON CALLBACKS
@@ -380,6 +413,8 @@ def next_condition():
 
 start_btn.config(command=lambda: threading.Thread(target=start_experiment).start())
 next_btn.config(command=lambda: threading.Thread(target=next_condition).start())
+stop_btn.config(command=stop_experiment)
+
 
 # =====================================================
 #                WIDGET BINDINGS
