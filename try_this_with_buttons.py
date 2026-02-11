@@ -169,7 +169,7 @@ def select_override(event):
         threading.Thread(target=run_current_condition).start()
     else:
         # Revert dropdown to current canonical condition
-        override_var.set(current_conditions[current_index][0])
+        override_var.set(canonical_conditions[remaining_conditions][0])
 
 
 def confirm_override(cond_name):
@@ -182,7 +182,7 @@ def confirm_override(cond_name):
 def redo_current_condition():
     global override_condition_name, is_redo_run
 
-    cond_name = current_conditions[current_index][0]
+    cond_name = canonical_conditions[remaining_conditions][0]
 
     if confirm_override(cond_name):
         override_condition_name = cond_name
@@ -309,15 +309,14 @@ def build_conditions():
 #                EXPERIMENT THREAD
 # =====================================================
 
-current_conditions = []
-current_index = 0  # Track which condition is next
+canonical_conditions = []
+remaining_conditions = 0  # Track which condition is next
 override_condition_name = None
 is_redo_run = False
 
 
 def start_experiment():
-    """Starts the first condition of the experiment."""
-    global current_conditions, current_index
+    global canonical_conditions, remaining_conditions
     start_btn.config(state="disabled")
     next_btn.config(state="disabled")
     fixation_label.lift()
