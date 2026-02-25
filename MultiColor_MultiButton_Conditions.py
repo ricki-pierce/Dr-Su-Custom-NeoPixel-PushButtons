@@ -26,6 +26,7 @@ import random
 import threading
 import winsound  # For beeps on Windows systems
 import tkinter as tk
+import pandas as pd
 from tkinter import ttk, messagebox, font
 
 
@@ -101,11 +102,33 @@ canonical_conditions = []      # Frozen randomized order
 remaining_conditions = []      # Conditions still to run
 current_condition_name = None  # Track active condition# 
 condition_history = {}  # {condition_name: completed_trials / total_trials}
-
+event_log = []  # Each entry: dict with timestamp, event type, button, trial info
 
 #====================================================
 #                HELPER FUNCTIONS
 # =====================================================
+def show_instructions(cond_name, trials, is_repeat=False):
+    trial_names = [t["pattern"] for t in trials]
+    display_name = f"{cond_name} (REPEAT)" if is_repeat else cond_name
+    instr_text = f"Condition: {display_name}\n\nTrials:\n" + "\n".join(trial_names) + \
+                 "\n\nAfter instructing participant, press SPACEBAR to begin 10-second fixation cross and trials."
+
+    instr_window = tk.Toplevel(root)
+    instr_window.title("Instructions")
+    instr_window.geometry("500x400")
+    tk.Label(instr_window, text=instr_text, font=("Arial", 14), justify="left").pack(pady=20, padx=20)
+
+    space_pressed = threading.Event()
+
+    def on_space(event):
+        space_pressed.set()
+        instr_window.destroy()
+
+    instr_window.bind("<space>", on_space)
+    instr_window.grab_set()  # Make modal
+    root.wait_window(instr_window)
+    space_pressed.wait()
+    
 def show_fixation():
     fixation_label.lift()  # Bring cross to top
     root.update()
@@ -223,7 +246,16 @@ def update_history():
         history_text.config(state="disabled")
     root.after(0, _update)
 
-
+def log_event(event_type, button, cond_name, trial_num, trial_type, is_repeat=False):
+    event_log.append({
+        "timestamp": time.time(),
+        "event": event_type,
+        "button": button,
+        "condition": cond_name,
+        "trial_num": trial_num + 1,
+        "trial_type": trial_type,
+        "is_repeat": is_repeat
+    })
 # =====================================================
 #                TRIAL PRESENTATION LOGIC
 # =====================================================
@@ -251,15 +283,25 @@ def run_trials(trials, cond_name):
             return
 
         # ---------- Go-Blue Pattern ----------
+        # Example: GO_BLUE
         if pattern == "GO_BLUE":
             options = [i for i in range(NUM_BUTTONS) if i != last_blue]
             blue_button = random.choice(options)
             active_buttons = [blue_button]
 
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
-            send_arduino(f"GO_BLUE {blue_button}")
 
-            wait_for_press(10000, [blue_button])
+            # Send command to Arduino and log
+            send_arduino(f"GO_BLUE {blue_button}")
+            log_event("button_lit", blue_button, cond_name, trial_num, pattern, is_redo_run)
+
+            pressed = wait_for_press(10000, [blue_button])
+            if pressed is not None:
+                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
+
+            # OPTIONAL: If your Arduino sends a "RELEASED <button>" message, you could also log:
+            # log_event("button_released", pressed, cond_name, trial_num, pattern, is_redo_run)
+
             last_blue = blue_button
             time.sleep(3)
 
@@ -270,13 +312,15 @@ def run_trials(trials, cond_name):
             active_buttons = [red_button]
 
             update_status(cond_name, trial_num, pattern, active_buttons)
-            send_arduino(f"STOP_RED {red_button}")
 
-            # Wait up to 10 seconds for press
-            press = wait_for_press(10000, [red_button])
-            if press is not None:
+            send_arduino(f"STOP_RED {red_button}")
+            log_event("button_lit", red_button, cond_name, trial_num, pattern, is_redo_run)
+
+            pressed = wait_for_press(10000, [red_button])
+            if pressed is not None:
+                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
                 time.sleep(3)  # only 3s pause if button pressed
-            # else: move to next trial immediately
+
 
         # ---------- Only-Blue Pattern ----------
         elif pattern == "ONLY_BLUE":
@@ -286,9 +330,14 @@ def run_trials(trials, cond_name):
             active_buttons = red_buttons + [blue_button]
 
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
-            send_arduino(f"ONLY_BLUE {','.join(map(str, red_buttons + [blue_button]))}")
 
-            wait_for_press(10000, [blue_button])
+            send_arduino(f"ONLY_BLUE {','.join(map(str, active_buttons))}")
+            log_event("button_lit", blue_button, cond_name, trial_num, pattern, is_redo_run)
+
+            pressed = wait_for_press(10000, [blue_button])
+            if pressed is not None:
+                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
+
             last_blue = blue_button
             time.sleep(3)
 
@@ -300,9 +349,14 @@ def run_trials(trials, cond_name):
             active_buttons = blue_buttons + [red_button]
 
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=red_button)
-            send_arduino(f"ONLY_RED {','.join(map(str, blue_buttons + [red_button]))}")
 
-            wait_for_press(10000, [red_button])
+            send_arduino(f"ONLY_RED {','.join(map(str, active_buttons))}")
+            log_event("button_lit", red_button, cond_name, trial_num, pattern, is_redo_run)
+
+            pressed = wait_for_press(10000, [red_button])
+            if pressed is not None:
+                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
+
             last_only_red = red_button
             time.sleep(3)
 
@@ -397,37 +451,30 @@ def run_current_condition():
         fixation_label.lower()
         return
 
-        if override_condition_name and is_manual_selection:
-            # Remove chosen condition from remaining_conditions
-            remaining_conditions = [
-                (name, trials) for name, trials in remaining_conditions
-                if name != cond_name
-            ]
+    # ---------------- DETERMINE CONDITION ----------------
 
-
-    # Determine condition source
-    if override_condition_name and is_manual_selection:
+    if override_condition_name:
         cond_name = override_condition_name
         trials = next(c[1] for c in canonical_conditions if c[0] == cond_name)
-        run_type = "MANUAL"
-    elif override_condition_name:
-        # This is a random Next Condition
-        cond_name = override_condition_name
-        trials = next(c[1] for c in canonical_conditions if c[0] == cond_name)
-        run_type = "RANDOM"
     else:
         cond_name, trials = remaining_conditions[0]
-        run_type = "CANONICAL"
-
 
     current_condition_name = cond_name
 
-    # Correctly handle REPEAT vs manual selection
-    if is_redo_run:
-        display_name = f"{cond_name} (REPEAT)"
-    else:
-        display_name = cond_name
+    # ---------------- SHOW INSTRUCTIONS ----------------
 
+    show_instructions(cond_name, trials, is_redo_run)
+
+    # ---------------- 10 SECOND FIXATION ----------------
+
+    fixation_label.lift()
+    root.update()
+    time.sleep(10)
+    fixation_label.lower()
+
+    # ---------------- HISTORY SETUP ----------------
+
+    display_name = f"{cond_name} (REPEAT)" if is_redo_run else cond_name
     total_trials = len(trials)
 
     if cond_name not in condition_history:
@@ -440,34 +487,31 @@ def run_current_condition():
     })
 
     update_history()
-
     override_var.set(display_name)
 
-
-    fixation_label.lower()
     stop_requested = False
 
-    print(f"RUNNING CONDITION: {cond_name} | TYPE: {run_type}")
+    print(f"RUNNING CONDITION: {cond_name}")
+
+    # ---------------- RUN TRIALS ----------------
 
     run_trials(trials, cond_name)
 
     if stop_requested:
-        print("CONDITION STOPPED EARLY")
         stop_requested = False
         return
 
     beep()
 
-    # If canonical run finished, remove from remaining
+    # ---------------- REMOVE FROM REMAINING ----------------
+
     if not override_condition_name:
         remaining_conditions.pop(0)
-
-    # If manual selection and condition still in remaining → remove it
-    if override_condition_name:
-        for i, (name, _) in enumerate(remaining_conditions):
-            if name == cond_name:
-                remaining_conditions.pop(i)
-                break
+    else:
+        remaining_conditions = [
+            (name, t) for name, t in remaining_conditions
+            if name != cond_name
+        ]
 
     override_condition_name = None
     is_redo_run = False
@@ -507,7 +551,24 @@ history_text.pack(fill="both", expand=True)
 history_frame.place(relx=0.0, rely=0.6, relwidth=1.0, relheight=0.35)
 
 
+def save_log_on_exit():
+    global stop_requested
+    stop_requested = True  # stop trials loop safely
 
+    try:
+        if event_log:
+            df = pd.DataFrame(event_log)
+            df.to_excel("button_task_log.xlsx", index=False)
+            print("Log saved to button_task_log.xlsx")
+    except Exception as e:
+        print("Error saving log:", e)
+
+    try:
+        arduino.close()
+    except:
+        pass
+
+    root.destroy()
 
 # =====================================================
 #                BUTTON CALLBACKS
@@ -526,4 +587,5 @@ redo_btn.config(command=redo_current_condition)
 # =====================================================
 #                RUN GUI MAIN LOOP
 # =====================================================
+root.protocol("WM_DELETE_WINDOW", lambda: [save_log_on_exit(), root.destroy()])
 root.mainloop()
