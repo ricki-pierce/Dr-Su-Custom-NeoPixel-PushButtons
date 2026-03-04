@@ -20,6 +20,7 @@ DEPENDENCIES:
   pip install pyserial
 """
 
+import os
 import serial
 import time
 import random
@@ -28,9 +29,28 @@ import winsound  # For beeps on Windows systems
 import tkinter as tk
 import pandas as pd
 from tkinter import ttk, messagebox, font
+from datetime import datetime
+import subprocess
 
 
 # =====================================================
+def sync_windows_time():
+    """
+    Sync the Windows system clock using w32tm.
+    Must be run with administrator privileges for full effect.
+    """
+    try:
+        # Resync time
+        subprocess.run(["w32tm", "/resync"], check=True, capture_output=True, text=True)
+        print("Windows time synced.")
+    except subprocess.CalledProcessError as e:
+        print("Time sync failed:", e.stdout, e.stderr)
+    except Exception as e:
+        print("Unexpected error during time sync:", e)
+
+sync_windows_time()
+
+
 #                ARDUINO SERIAL SETUP
 # =====================================================
 arduino = serial.Serial('COM3', 115200, timeout=1)
@@ -107,6 +127,7 @@ event_log = []  # Each entry: dict with timestamp, event type, button, trial inf
 #====================================================
 #                HELPER FUNCTIONS
 # =====================================================
+
 def show_instructions(cond_name, trials, is_repeat=False):
     trial_names = [t["pattern"] for t in trials]
     display_name = f"{cond_name} (REPEAT)" if is_repeat else cond_name
@@ -115,7 +136,11 @@ def show_instructions(cond_name, trials, is_repeat=False):
 
     instr_window = tk.Toplevel(root)
     instr_window.title("Instructions")
-    instr_window.geometry("500x400")
+
+    # --- FORCE FULLSCREEN ---
+    instr_window.attributes("-fullscreen", True)
+    instr_window.configure(bg="white")
+    instr_window.focus_force()
     tk.Label(instr_window, text=instr_text, font=("Arial", 14), justify="left").pack(pady=20, padx=20)
 
     space_pressed = threading.Event()
@@ -136,7 +161,10 @@ def show_fixation():
 
 def stop_experiment():
     global stop_requested
+    log_gui_event("stop_button_clicked")
+
     stop_requested = True
+    send_arduino("ALL_OFF")  # turn everything off
     next_btn.config(state="normal")
 
 def beep():
@@ -146,25 +174,37 @@ def beep():
 def send_arduino(cmd):
     """Send a command string to the Arduino."""
     arduino.write((cmd + "\n").encode('utf-8'))
+    log_gui_event("arduino_command_sent", cmd)
 
 def wait_for_press(timeout_ms, expected_buttons):
     """
-    Waits for a button press signal from the Arduino.
-    Returns the index of the pressed button or None if timeout.
-    Only accepts presses from expected_buttons.
+    Waits for a button press from Arduino for up to timeout_ms.
+    Returns a tuple: (pressed_button, is_correct)
+    pressed_button: int index of button actually pressed, or None if timeout
+    is_correct: True if pressed button is in expected_buttons, False if not
     """
     start_time = time.time()
     while (time.time() - start_time) * 1000 < timeout_ms:
         if stop_requested:
-          return
+            return None, False
         if arduino.in_waiting:
             line = arduino.readline().decode('utf-8').strip()
+            if line.startswith("LIT"):
+                parts = line.split()
+                lit_btn = int(parts[1])
+                log_event(
+                    "button_lit_actual",
+                    cond_name=current_condition_name,
+                    trial_num=0,
+                    trial_type="hardware_feedback",
+                    target_button=lit_btn,
+                    pressed_button=None
+                )
             if line.startswith("PRESSED"):
                 idx = int(line.split()[1])
-                if idx in expected_buttons:
-                    return idx  # valid press
-        time.sleep(0.01)  # avoid hogging CPU
-    return None
+                return idx, idx in expected_buttons
+        time.sleep(0.01)
+    return None, False
 
 def update_status(cond_name, trial_num, pattern, active_buttons, target_button=None):
     def _update():
@@ -224,6 +264,8 @@ def confirm_override(cond_name):
 def redo_current_condition():
     global override_condition_name, is_redo_run, is_manual_selection
 
+    log_gui_event("redo_condition_clicked")
+    
     cond_name = current_condition_name  # Redo current condition
 
     if confirm_override(cond_name):
@@ -246,15 +288,34 @@ def update_history():
         history_text.config(state="disabled")
     root.after(0, _update)
 
-def log_event(event_type, button, cond_name, trial_num, trial_type, is_repeat=False):
+def log_event(event_type, cond_name, trial_num, trial_type, target_button=None, pressed_button=None, active_buttons=None, is_repeat=False):
+    """
+    Log trial events with both target and actual pressed button.
+    """
     event_log.append({
-        "timestamp": time.time(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
         "event": event_type,
-        "button": button,
         "condition": cond_name,
-        "trial_num": trial_num + 1,
+        "trial_num": trial_num + 1 if trial_num is not None else "",
         "trial_type": trial_type,
+        "target_button": target_button if target_button is not None else "",
+        "pressed_button": pressed_button if pressed_button is not None else "",
+        "active_buttons": ",".join(map(str, active_buttons)) if active_buttons else "",
         "is_repeat": is_repeat
+    })
+
+def log_gui_event(event_type, extra=None):
+    """
+    General timestamped GUI/system event logger.
+    """
+    event_log.append({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+        "event": event_type,
+        "details": extra if extra else "",
+        "condition": current_condition_name,
+        "trial_num": "",
+        "trial_type": "",
+        "button": ""
     })
 # =====================================================
 #                TRIAL PRESENTATION LOGIC
@@ -275,54 +336,117 @@ def run_trials(trials, cond_name):
         blue_button = None
         red_button = None
         active_buttons = []
-      
+
         if stop_requested:
             current_run = condition_history[cond_name][-1]
             current_run['completed'] = trial_num
             update_history()
             return
 
-        # ---------- Go-Blue Pattern ----------
-        # Example: GO_BLUE
+        # ---------- GO_BLUE ----------
         if pattern == "GO_BLUE":
+            # Pick a blue button avoiding repeat
             options = [i for i in range(NUM_BUTTONS) if i != last_blue]
             blue_button = random.choice(options)
             active_buttons = [blue_button]
 
+            # Update GUI
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
 
-            # Send command to Arduino and log
+            # Light the button on Arduino
             send_arduino(f"GO_BLUE {blue_button}")
-            log_event("button_lit", blue_button, cond_name, trial_num, pattern, is_redo_run)
 
-            pressed = wait_for_press(10000, [blue_button])
-            if pressed is not None:
-                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
+            # Log the lit button
+            log_event(
+                event_type="button_lit",
+                cond_name=cond_name,
+                trial_num=trial_num,
+                trial_type=pattern,
+                target_button=blue_button,
+                pressed_button=None,
+                active_buttons=active_buttons,
+                is_repeat=is_redo_run
+            )
 
-            # OPTIONAL: If your Arduino sends a "RELEASED <button>" message, you could also log:
-            # log_event("button_released", pressed, cond_name, trial_num, pattern, is_redo_run)
+            # ---- Wait for any button press, up to 10s ----
+            start_time = time.time()
+            pressed_button = None
+            while (time.time() - start_time) * 1000 < 10000:  # 10s timeout
+                if stop_requested:
+                    return
+                if arduino.in_waiting:
+                    line = arduino.readline().decode('utf-8').strip()
+                    if line.startswith("PRESSED"):
+                        pressed_button = int(line.split()[1])
+                        # Log actual button pressed (even if incorrect)
+                        log_event(
+                            event_type="button_pressed",
+                            cond_name=cond_name,
+                            trial_num=trial_num,
+                            trial_type=pattern,
+                            target_button=blue_button,
+                            pressed_button=pressed_button,
+                            active_buttons=active_buttons,
+                            is_repeat=is_redo_run
+                        )
+                        break
+                time.sleep(0.01)
 
-            last_blue = blue_button
+            # ---- Turn off lights ----
+            send_arduino("ALL_OFF")
+
+            # ---- Pause 3 seconds after any press or timeout ----
             time.sleep(3)
 
-        # ---------- Stop-Red Pattern ----------
+            # Track last blue to avoid repeats
+            last_blue = blue_button
+
+        # ---------- STOP_RED ----------
         elif pattern == "STOP_RED":
             options = list(range(NUM_BUTTONS))
             red_button = random.choice(options)
             active_buttons = [red_button]
 
-            update_status(cond_name, trial_num, pattern, active_buttons)
-
+            update_status(cond_name, trial_num, pattern, active_buttons, target_button=red_button)
             send_arduino(f"STOP_RED {red_button}")
-            log_event("button_lit", red_button, cond_name, trial_num, pattern, is_redo_run)
 
-            pressed = wait_for_press(10000, [red_button])
-            if pressed is not None:
-                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
-                time.sleep(3)  # only 3s pause if button pressed
+            log_event(
+                event_type="button_lit",
+                cond_name=cond_name,
+                trial_num=trial_num,
+                trial_type=pattern,
+                target_button=red_button,
+                pressed_button=None,
+                active_buttons=active_buttons,
+                is_repeat=is_redo_run
+            )
 
+            start_time = time.time()
+            pressed_button = None
+            while (time.time() - start_time) * 1000 < 10000:
+                if stop_requested:
+                    return
+                if arduino.in_waiting:
+                    line = arduino.readline().decode('utf-8').strip()
+                    if line.startswith("PRESSED"):
+                        pressed_button = int(line.split()[1])
+                        log_event(
+                            event_type="button_pressed",
+                            cond_name=cond_name,
+                            trial_num=trial_num,
+                            trial_type=pattern,
+                            target_button=red_button,
+                            pressed_button=pressed_button,
+                            active_buttons=active_buttons,
+                            is_repeat=is_redo_run
+                        )
+                        break
+                time.sleep(0.01)
 
-        # ---------- Only-Blue Pattern ----------
+            send_arduino("ALL_OFF")
+            time.sleep(3)
+
+        # ---------- ONLY_BLUE ----------
         elif pattern == "ONLY_BLUE":
             options = [i for i in range(NUM_BUTTONS) if i != last_blue]
             blue_button = random.choice(options)
@@ -330,18 +454,46 @@ def run_trials(trials, cond_name):
             active_buttons = red_buttons + [blue_button]
 
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
-
             send_arduino(f"ONLY_BLUE {','.join(map(str, active_buttons))}")
-            log_event("button_lit", blue_button, cond_name, trial_num, pattern, is_redo_run)
 
-            pressed = wait_for_press(10000, [blue_button])
-            if pressed is not None:
-                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
+            log_event(
+                event_type="button_lit",
+                cond_name=cond_name,
+                trial_num=trial_num,
+                trial_type=pattern,
+                target_button=blue_button,
+                pressed_button=None,
+                active_buttons=active_buttons,
+                is_repeat=is_redo_run
+            )
 
-            last_blue = blue_button
+            start_time = time.time()
+            pressed_button = None
+            while (time.time() - start_time) * 1000 < 10000:
+                if stop_requested:
+                    return
+                if arduino.in_waiting:
+                    line = arduino.readline().decode('utf-8').strip()
+                    if line.startswith("PRESSED"):
+                        pressed_button = int(line.split()[1])
+                        log_event(
+                            event_type="button_pressed",
+                            cond_name=cond_name,
+                            trial_num=trial_num,
+                            trial_type=pattern,
+                            target_button=blue_button,
+                            pressed_button=pressed_button,
+                            active_buttons=active_buttons,
+                            is_repeat=is_redo_run
+                        )
+                        break
+                time.sleep(0.01)
+
+            send_arduino("ALL_OFF")
             time.sleep(3)
+            last_blue = blue_button
 
-        # ---------- Only-Red Pattern ----------
+        # ---------- ONLY_RED ----------
         elif pattern == "ONLY_RED":
             options = [i for i in range(NUM_BUTTONS) if i != last_only_red]
             red_button = random.choice(options)
@@ -349,20 +501,47 @@ def run_trials(trials, cond_name):
             active_buttons = blue_buttons + [red_button]
 
             update_status(cond_name, trial_num, pattern, active_buttons, target_button=red_button)
-
             send_arduino(f"ONLY_RED {','.join(map(str, active_buttons))}")
-            log_event("button_lit", red_button, cond_name, trial_num, pattern, is_redo_run)
 
-            pressed = wait_for_press(10000, [red_button])
-            if pressed is not None:
-                log_event("button_pressed", pressed, cond_name, trial_num, pattern, is_redo_run)
+            log_event(
+                event_type="button_lit",
+                cond_name=cond_name,
+                trial_num=trial_num,
+                trial_type=pattern,
+                target_button=red_button,
+                pressed_button=None,
+                active_buttons=active_buttons,
+                is_repeat=is_redo_run
+            )
 
-            last_only_red = red_button
+            start_time = time.time()
+            pressed_button = None
+            while (time.time() - start_time) * 1000 < 10000:
+                if stop_requested:
+                    return
+                if arduino.in_waiting:
+                    line = arduino.readline().decode('utf-8').strip()
+                    if line.startswith("PRESSED"):
+                        pressed_button = int(line.split()[1])
+                        log_event(
+                            event_type="button_pressed",
+                            cond_name=cond_name,
+                            trial_num=trial_num,
+                            trial_type=pattern,
+                            target_button=red_button,
+                            pressed_button=pressed_button,
+                            active_buttons=active_buttons,
+                            is_repeat=is_redo_run
+                        )
+                        break
+                time.sleep(0.01)
+
+            send_arduino("ALL_OFF")
             time.sleep(3)
+            last_only_red = red_button
 
-    # If all trials complete
-    # Update history for this specific run
-    current_run = condition_history[cond_name][-1]  # last entry for this condition
+    # After all trials, update history
+    current_run = condition_history[cond_name][-1]
     current_run['completed'] = trial_num + 1
     update_history()
 
@@ -501,6 +680,9 @@ def run_current_condition():
         stop_requested = False
         return
 
+    send_arduino("ALL_OFF")
+    log_gui_event("condition_end_all_off")
+
     beep()
 
     # ---------------- REMOVE FROM REMAINING ----------------
@@ -528,6 +710,8 @@ def next_condition():
     """
     global override_condition_name, is_manual_selection, is_redo_run
 
+    log_gui_event("next_condition_clicked")
+    
     override_condition_name = None  # ensure no manual override
     is_manual_selection = False
     is_redo_run = False
@@ -553,21 +737,48 @@ history_frame.place(relx=0.0, rely=0.6, relwidth=1.0, relheight=0.35)
 
 def save_log_on_exit():
     global stop_requested
-    stop_requested = True  # stop trials loop safely
+    stop_requested = True  # safely stop any running trials
 
+    # --- Turn off all buttons first ---
+    try:
+        send_arduino("ALL_OFF")
+        log_gui_event("gui_closed_all_off")
+    except Exception as e:
+        print("Error turning off Arduino LEDs:", e)
+
+    # --- Save event log to Excel ---
     try:
         if event_log:
             df = pd.DataFrame(event_log)
-            df.to_excel("button_task_log.xlsx", index=False)
-            print("Log saved to button_task_log.xlsx")
-    except Exception as e:
-        print("Error saving log:", e)
 
+            # Sort by timestamp
+            df.sort_values("timestamp", inplace=True)
+
+            # Ensure target folder exists
+            save_folder = r"C:\Users\rpier12\Python Results"
+            os.makedirs(save_folder, exist_ok=True)
+
+            # Construct full file path
+            file_path = os.path.join(
+                save_folder,
+                f"button_task_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            )
+
+            # Save Excel
+            df.to_excel(file_path, index=False)
+            print(f"Log saved to {file_path}")
+        else:
+            print("No events to save.")
+    except Exception as e:
+        print("Error saving Excel log:", e)
+
+    # --- Close Arduino connection ---
     try:
         arduino.close()
-    except:
-        pass
+    except Exception as e:
+        print("Error closing Arduino serial:", e)
 
+    # --- Destroy the GUI window last ---
     root.destroy()
 
 # =====================================================
@@ -587,5 +798,5 @@ redo_btn.config(command=redo_current_condition)
 # =====================================================
 #                RUN GUI MAIN LOOP
 # =====================================================
-root.protocol("WM_DELETE_WINDOW", lambda: [save_log_on_exit(), root.destroy()])
+root.protocol("WM_DELETE_WINDOW", save_log_on_exit)
 root.mainloop()
