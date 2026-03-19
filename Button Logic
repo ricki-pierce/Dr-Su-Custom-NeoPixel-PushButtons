@@ -1,0 +1,32 @@
+Task Overview:
+This code implements a button-press task using four lighting patterns across multiple experimental conditions. 
+
+Lighting Patterns:
+Participants respond to button lights according to the following rules:
+Go-Blue: Press the button when a single blue light appears.
+Stop-Red: Do not press when a red light appears.
+Only-Blue: When three red lights and one blue light appear, press only the blue button.
+Only-Red: When three blue lights and one red light appear, press only the red button.
+
+Conditions (10 trials each):
+Go: 10 Go-Blue trials
+No-Go: 8 Go-Blue trials AND 2 Stop-Red trials
+No-Shift: 10 Only-Blue trials
+Shift: 8 Only-Blue trials AND 2 Only-Red trials
+
+Stance Parameters:
+Each condition is performed under two stance conditions:
+Feet apart
+Feet together
+
+Experimental Design:
+Each condition × stance combination is presented twice.
+Order is randomized within each run.
+The full experiment is completed by running the code TWICE, resulting in:
+4 conditions × 2 stances × 2 repetitions = 16 total blocks
+
+Summary:
+4 conditions
+2 stance parameters
+10 trials per block
+16 total blocks across two runs
