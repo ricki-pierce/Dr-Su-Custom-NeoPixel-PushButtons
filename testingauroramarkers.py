@@ -1,37 +1,37 @@
-import socket
+from pylsl import StreamInfo, StreamOutlet, resolve_streams
 import time
 
-AURORA_HOST = '127.0.0.1'
-AURORA_PORT = 9000
+# First, let's see what LSL streams Aurora is already broadcasting
+print("Searching for existing LSL streams (Aurora should show up here)...")
+streams = resolve_streams(wait_time=3.0)
 
-def send_raw(message, label):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(2)
-            sock.connect((AURORA_HOST, AURORA_PORT))
-            sock.sendall(message)
-            print(f"✓ Sent [{label}]: {repr(message)}")
-    except Exception as e:
-        print(f"✗ Failed [{label}]: {e}")
+if streams:
+    for s in streams:
+        print(f"  Found stream: name='{s.name()}' type='{s.type()}' source='{s.source_id()}'")
+else:
+    print("  No LSL streams found!")
 
-if __name__ == "__main__":
-    print("Testing different trigger formats...\n")
-    
-    formats = [
-        (b"1\n",                    "plain number newline"),
-        (b"1\r\n",                  "plain number CRLF"),
-        (b"TTL1\n",                 "TTL format"),
-        (b"MARKER 1\n",             "MARKER space"),
-        (b"MARKER=1\n",             "MARKER equals"),
-        (b"trigger 1\n",            "trigger lowercase"),
-        (b"TRIGGER 1\n",            "TRIGGER uppercase"),
-        (b"\x01",                   "raw byte 0x01"),
-        (b"stimulus=1\n",           "stimulus format"),
-        (b'{"marker": 1}\n',        "JSON format"),
-    ]
-    
-    for msg, label in formats:
-        send_raw(msg, label)
-        time.sleep(2)   # wait between each so you can see them individually in Aurora
-    
-    print("\nDone — check Aurora for any markers that appeared!")
+print()
+
+# Now create our marker outlet
+print("Creating marker outlet...")
+info = StreamInfo(
+    name='MyMarkerStream',
+    type='Markers',
+    channel_count=1,
+    nominal_srate=0,
+    channel_format='int32',
+    source_id='my_experiment'
+)
+outlet = StreamOutlet(info)
+print("Outlet created. Waiting 3 seconds for Aurora to detect it...")
+time.sleep(3)
+
+print("Sending marker 1...")
+outlet.push_sample([1])
+time.sleep(2)
+print("Sending marker 2...")
+outlet.push_sample([2])
+time.sleep(2)
+
+print("Done — check Aurora!")
