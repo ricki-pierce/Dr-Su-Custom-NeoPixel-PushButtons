@@ -11,6 +11,10 @@ FUNCTION:
 - Sends commands to Arduino to light up buttons in specific color patterns.
 - Receives button press data from Arduino.
 - Plays beeps between conditions to signal start/end.
+- Sends LSL markers to Aurora fNIRS for three events:
+    Marker 1 = button commanded to light up
+    Marker 2 = button confirmed lit (hardware feedback)
+    Marker 4 = button pressed
 
 HARDWARE CONNECTIONS (Arduino side):
 Buttons: Pins 2–5
@@ -23,7 +27,7 @@ TIMING LOGIC (per trial):
 - This applies to all patterns: GO_BLUE, STOP_RED, ONLY_BLUE, ONLY_RED.
 
 DEPENDENCIES:
-  pip install pyserial
+  pip install pyserial pylsl
 """
 
 import os
@@ -37,6 +41,33 @@ import pandas as pd
 from tkinter import ttk, messagebox, font
 from datetime import datetime
 import subprocess
+from pylsl import StreamInfo, StreamOutlet  # <<< LSL
+
+
+# =====================================================
+#                LSL SETUP
+# =====================================================
+
+# Create the LSL marker outlet — name must match Aurora's "Trigger in stream name"
+_lsl_info = StreamInfo(
+    name='Trigger',          # <<< LSL — must match Aurora exactly
+    type='Markers',
+    channel_count=1,
+    channel_format='int32',
+    source_id='ButtonController'
+)
+lsl_outlet = StreamOutlet(_lsl_info)  # <<< LSL
+print("LSL Trigger stream created — start recording in Aurora before beginning task")
+
+# Marker codes
+MARKER_BUTTON_COMMANDED  = 1   # <<< LSL — button told to light up
+MARKER_BUTTON_LIT        = 2   # <<< LSL — button confirmed lit by hardware
+MARKER_BUTTON_PRESSED    = 4   # <<< LSL — button physically pressed
+
+def send_marker(marker_value, label=""):  # <<< LSL
+    """Send a single integer marker to Aurora via LSL."""
+    lsl_outlet.push_sample([marker_value])
+    print(f"LSL Marker sent: {marker_value} ({label})")
 
 
 # =====================================================
@@ -137,7 +168,8 @@ def show_instructions(cond_name, trials, is_repeat=False):
     trial_names = [t["pattern"] for t in trials]
     display_name = f"{cond_name} (REPEAT)" if is_repeat else cond_name
     instr_text = f"Condition: {display_name}\n\nTrials:\n" + "\n".join(trial_names) + \
-                 "\n\nAfter instructing participant, press SPACEBAR to begin 10-second fixation cross and trials."
+                 "\n\nAfter instructing participant, press SPACEBAR to begin 10-second fixation cross and trials.\n\nDon't forget to manually Start/Stop the Aurora fNIRS recording. \nMarkers will be placed in fNIRS data corresponding to buttons being lit and pressed."
+    
 
     instr_window = tk.Toplevel(root)
     instr_window.title("Instructions")
@@ -197,6 +229,7 @@ def wait_for_press(timeout_ms, expected_buttons):
             if line.startswith("LIT"):
                 parts = line.split()
                 lit_btn = int(parts[1])
+                send_marker(MARKER_BUTTON_LIT, f"Button {lit_btn} confirmed lit (wait_for_press)")  # <<< LSL
                 log_event(
                     "button_lit_actual",
                     cond_name=current_condition_name,
@@ -255,7 +288,7 @@ def select_override(event):
 def confirm_manual_selection(cond_name):
     return messagebox.askyesno(
         "Confirm Condition Selection",
-        f"Run condition next:\n\n{cond_name}\n\nThis will advance the experiment."
+        f"Run condition next:\n\n{cond_name}\n\nThis will advance the experiment.\n\nDon't forget to manually Start/Stop the Aurora fNIRS recording. \nMarkers will be placed in fNIRS data corresponding to buttons being lit and pressed."
     )
 
 
@@ -263,7 +296,7 @@ def confirm_override(cond_name):
     return messagebox.askyesno(
         "Confirm Condition Override",
         f"Redo condition:\n\n{cond_name}\n\n"
-        "This will NOT advance the experiment.\n\nProceed?"
+        "This will NOT advance the experiment.\n\nProceed?\n\nDon't forget to manually Start/Stop the Aurora fNIRS recording. \nMarkers will be placed in fNIRS data corresponding to buttons being lit and pressed."
     )
 
 def redo_current_condition():
@@ -378,9 +411,10 @@ def run_trials(trials, cond_name):
             active_buttons = [i for i in range(NUM_BUTTONS) if i != target_button] + [target_button]
             arduino_cmd = f"ONLY_RED {','.join(map(str, active_buttons))}"
 
-        # ---------- Light up buttons ----------
+        # ---------- Light up buttons + Marker 1 ----------
         update_status(cond_name, trial_num, pattern, active_buttons, target_button=target_button)
         send_arduino(arduino_cmd)
+        send_marker(MARKER_BUTTON_COMMANDED, f"Button commanded to light: {arduino_cmd}")  # <<< LSL
 
         log_event(
             event_type="button_lit",
@@ -401,8 +435,22 @@ def run_trials(trials, cond_name):
                 return
             if arduino.in_waiting > 0:
                 line = arduino.readline().decode('utf-8').strip()
+                if line.startswith("LIT"):                                          # <<< LSL
+                    lit_btn = int(line.split()[1])                                  # <<< LSL
+                    send_marker(MARKER_BUTTON_LIT, f"Button {lit_btn} confirmed lit")  # <<< LSL
+                    log_event(                                                       # <<< LSL
+                        event_type="button_lit_actual",                             # <<< LSL
+                        cond_name=cond_name,                                        # <<< LSL
+                        trial_num=trial_num,                                        # <<< LSL
+                        trial_type=pattern,                                         # <<< LSL
+                        target_button=lit_btn,                                      # <<< LSL
+                        pressed_button=None,                                        # <<< LSL
+                        active_buttons=active_buttons,                              # <<< LSL
+                        is_repeat=is_redo_run                                       # <<< LSL
+                    )                                                               # <<< LSL
                 if line.startswith("PRESSED"):
                     pressed_button = int(line.split()[1])
+                    send_marker(MARKER_BUTTON_PRESSED, f"Button {pressed_button} pressed")  # <<< LSL
                     log_event(
                         event_type="button_pressed",
                         cond_name=cond_name,
@@ -586,15 +634,11 @@ def run_current_condition():
 
 
 def next_condition():
-    """
-    Plays the next random condition from remaining_conditions.
-    Does NOT use the dropdown unless the researcher manually selected one.
-    """
     global override_condition_name, is_manual_selection, is_redo_run
 
     log_gui_event("next_condition_clicked")
 
-    override_condition_name = None  # ensure no manual override
+    override_condition_name = None
     is_manual_selection = False
     is_redo_run = False
 
@@ -602,12 +646,10 @@ def next_condition():
         messagebox.showinfo("Experiment Complete", "All conditions have been presented.")
         return
 
-    # Pick a random condition from remaining
     idx = random.randint(0, len(remaining_conditions)-1)
     cond_name, _ = remaining_conditions[idx]
-    override_condition_name = cond_name  # tell run_current_condition which condition to run
+    override_condition_name = cond_name
 
-    # Start in a background thread
     threading.Thread(target=run_current_condition, daemon=True).start()
 
 
@@ -619,34 +661,24 @@ history_frame.place(relx=0.0, rely=0.6, relwidth=1.0, relheight=0.35)
 
 def save_log_on_exit():
     global stop_requested
-    stop_requested = True  # safely stop any running trials
+    stop_requested = True
 
-    # --- Turn off all buttons first ---
     try:
         send_arduino("ALL_OFF")
         log_gui_event("gui_closed_all_off")
     except Exception as e:
         print("Error turning off Arduino LEDs:", e)
 
-    # --- Save event log to Excel ---
     try:
         if event_log:
             df = pd.DataFrame(event_log)
-
-            # Sort by timestamp
             df.sort_values("timestamp", inplace=True)
-
-            # Ensure target folder exists
             save_folder = r"C:\Users\rpier12\Python Results"
             os.makedirs(save_folder, exist_ok=True)
-
-            # Construct full file path
             file_path = os.path.join(
                 save_folder,
                 f"button_task_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             )
-
-            # Save Excel
             df.to_excel(file_path, index=False)
             print(f"Log saved to {file_path}")
         else:
@@ -654,13 +686,11 @@ def save_log_on_exit():
     except Exception as e:
         print("Error saving Excel log:", e)
 
-    # --- Close Arduino connection ---
     try:
         arduino.close()
     except Exception as e:
         print("Error closing Arduino serial:", e)
 
-    # --- Destroy the GUI window last ---
     root.destroy()
 
 # =====================================================
@@ -670,7 +700,6 @@ def save_log_on_exit():
 start_btn.config(command=lambda: threading.Thread(target=start_experiment).start())
 next_btn.config(command=lambda: threading.Thread(target=next_condition).start())
 stop_btn.config(command=stop_experiment)
-
 
 # =====================================================
 #                WIDGET BINDINGS
