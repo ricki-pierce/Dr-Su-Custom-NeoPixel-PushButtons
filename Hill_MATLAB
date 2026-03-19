@@ -1,0 +1,15 @@
+  % This is the MATLAB code Dr Hill provided me 2/5/26 for syncing EEG and fNIRS
+
+ports = serialportlist % display list of serial ports to connect to
+
+if ~isempty(instrfind) % if no port connected then close
+    fclose(instrfind);
+    delete(instrfind);
+end
+ 
+
+% define Serial Port for EEG
+e = serial('COM4','BaudRate', 128000, 'DataBits', 8); % set e to EEG which is connected to COM#
+fopen(e) % Open EEG port for communication
+
+fprintf(e, 'WRITE 230 5000 0\n'); % write to EEG port
