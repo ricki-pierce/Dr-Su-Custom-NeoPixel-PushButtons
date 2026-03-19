@@ -16,6 +16,12 @@ HARDWARE CONNECTIONS (Arduino side):
 Buttons: Pins 2–5
 LEDs (NeoPixels): Pins 6–9
 
+TIMING LOGIC (per trial):
+- Button lights up and stays lit for the full 10 seconds regardless of any press.
+- After 10 seconds, lights turn off automatically.
+- A 3-second pause follows before the next trial begins.
+- This applies to all patterns: GO_BLUE, STOP_RED, ONLY_BLUE, ONLY_RED.
+
 DEPENDENCIES:
   pip install pyserial
 """
@@ -40,7 +46,6 @@ def sync_windows_time():
     Must be run with administrator privileges for full effect.
     """
     try:
-        # Resync time
         subprocess.run(["w32tm", "/resync"], check=True, capture_output=True, text=True)
         print("Windows time synced.")
     except subprocess.CalledProcessError as e:
@@ -120,7 +125,7 @@ stop_requested = False
 
 canonical_conditions = []      # Frozen randomized order
 remaining_conditions = []      # Conditions still to run
-current_condition_name = None  # Track active condition# 
+current_condition_name = None  # Track active condition
 condition_history = {}  # {condition_name: completed_trials / total_trials}
 event_log = []  # Each entry: dict with timestamp, event type, button, trial info
 
@@ -153,7 +158,7 @@ def show_instructions(cond_name, trials, is_repeat=False):
     instr_window.grab_set()  # Make modal
     root.wait_window(instr_window)
     space_pressed.wait()
-    
+
 def show_fixation():
     fixation_label.lift()  # Bring cross to top
     root.update()
@@ -235,7 +240,7 @@ def select_override(event):
     global override_condition_name, is_redo_run, is_manual_selection
 
     selected = override_var.get()
-    
+
     if confirm_manual_selection(selected):
         override_condition_name = selected
         is_manual_selection = True
@@ -265,7 +270,7 @@ def redo_current_condition():
     global override_condition_name, is_redo_run, is_manual_selection
 
     log_gui_event("redo_condition_clicked")
-    
+
     cond_name = current_condition_name  # Redo current condition
 
     if confirm_override(cond_name):
@@ -317,6 +322,7 @@ def log_gui_event(event_type, extra=None):
         "trial_type": "",
         "button": ""
     })
+
 # =====================================================
 #                TRIAL PRESENTATION LOGIC
 # =====================================================
@@ -326,16 +332,21 @@ NUM_BUTTONS = 4  # Total number of buttons/LEDs
 def run_trials(trials, cond_name):
     """
     Executes all trials for a given condition.
-    Handles randomization rules, button lighting, timing, and responses.
+
+    TIMING PER TRIAL (identical for all 4 patterns):
+    - Button(s) light up.
+    - Wait up to 10 seconds for a press.
+    - If pressed: log it, break immediately, turn off lights, wait 3 seconds.
+    - If not pressed in 10s: turn off lights, wait 3 seconds.
     """
     last_blue = None       # Track last blue button to avoid repeats
     last_only_red = None   # Track last red button for Shift condition
 
     for trial_num, trial in enumerate(trials):
         pattern = trial["pattern"]
-        blue_button = None
-        red_button = None
+        target_button = None
         active_buttons = []
+        arduino_cmd = ""
 
         if stop_requested:
             current_run = condition_history[cond_name][-1]
@@ -343,202 +354,77 @@ def run_trials(trials, cond_name):
             update_history()
             return
 
-        # ---------- GO_BLUE ----------
+        # ---------- Build trial parameters ----------
         if pattern == "GO_BLUE":
-            # Pick a blue button avoiding repeat
             options = [i for i in range(NUM_BUTTONS) if i != last_blue]
-            blue_button = random.choice(options)
-            active_buttons = [blue_button]
+            target_button = random.choice(options)
+            active_buttons = [target_button]
+            arduino_cmd = f"GO_BLUE {target_button}"
 
-            # Update GUI
-            update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
-
-            # Light the button on Arduino
-            send_arduino(f"GO_BLUE {blue_button}")
-
-            # Log the lit button
-            log_event(
-                event_type="button_lit",
-                cond_name=cond_name,
-                trial_num=trial_num,
-                trial_type=pattern,
-                target_button=blue_button,
-                pressed_button=None,
-                active_buttons=active_buttons,
-                is_repeat=is_redo_run
-            )
-
-            # ---- Wait for any button press, up to 10s ----
-            start_time = time.time()
-            pressed_button = None
-            while (time.time() - start_time) * 1000 < 10000:  # 10s timeout
-                if stop_requested:
-                    return
-                if arduino.in_waiting:
-                    line = arduino.readline().decode('utf-8').strip()
-                    if line.startswith("PRESSED"):
-                        pressed_button = int(line.split()[1])
-                        # Log actual button pressed (even if incorrect)
-                        log_event(
-                            event_type="button_pressed",
-                            cond_name=cond_name,
-                            trial_num=trial_num,
-                            trial_type=pattern,
-                            target_button=blue_button,
-                            pressed_button=pressed_button,
-                            active_buttons=active_buttons,
-                            is_repeat=is_redo_run
-                        )
-                        break
-                time.sleep(0.01)
-
-            # ---- Turn off lights ----
-            send_arduino("ALL_OFF")
-
-            # ---- Pause 3 seconds after any press or timeout ----
-            time.sleep(3)
-
-            # Track last blue to avoid repeats
-            last_blue = blue_button
-
-        # ---------- STOP_RED ----------
         elif pattern == "STOP_RED":
-            options = list(range(NUM_BUTTONS))
-            red_button = random.choice(options)
-            active_buttons = [red_button]
+            target_button = random.choice(range(NUM_BUTTONS))
+            active_buttons = [target_button]
+            arduino_cmd = f"STOP_RED {target_button}"
 
-            update_status(cond_name, trial_num, pattern, active_buttons, target_button=red_button)
-            send_arduino(f"STOP_RED {red_button}")
-
-            log_event(
-                event_type="button_lit",
-                cond_name=cond_name,
-                trial_num=trial_num,
-                trial_type=pattern,
-                target_button=red_button,
-                pressed_button=None,
-                active_buttons=active_buttons,
-                is_repeat=is_redo_run
-            )
-
-            start_time = time.time()
-            pressed_button = None
-            while (time.time() - start_time) * 1000 < 10000:
-                if stop_requested:
-                    return
-                if arduino.in_waiting:
-                    line = arduino.readline().decode('utf-8').strip()
-                    if line.startswith("PRESSED"):
-                        pressed_button = int(line.split()[1])
-                        log_event(
-                            event_type="button_pressed",
-                            cond_name=cond_name,
-                            trial_num=trial_num,
-                            trial_type=pattern,
-                            target_button=red_button,
-                            pressed_button=pressed_button,
-                            active_buttons=active_buttons,
-                            is_repeat=is_redo_run
-                        )
-                        break
-                time.sleep(0.01)
-
-            send_arduino("ALL_OFF")
-            time.sleep(3)
-
-        # ---------- ONLY_BLUE ----------
         elif pattern == "ONLY_BLUE":
             options = [i for i in range(NUM_BUTTONS) if i != last_blue]
-            blue_button = random.choice(options)
-            red_buttons = [i for i in range(NUM_BUTTONS) if i != blue_button]
-            active_buttons = red_buttons + [blue_button]
+            target_button = random.choice(options)
+            active_buttons = [i for i in range(NUM_BUTTONS) if i != target_button] + [target_button]
+            arduino_cmd = f"ONLY_BLUE {','.join(map(str, active_buttons))}"
 
-            update_status(cond_name, trial_num, pattern, active_buttons, target_button=blue_button)
-            send_arduino(f"ONLY_BLUE {','.join(map(str, active_buttons))}")
-
-            log_event(
-                event_type="button_lit",
-                cond_name=cond_name,
-                trial_num=trial_num,
-                trial_type=pattern,
-                target_button=blue_button,
-                pressed_button=None,
-                active_buttons=active_buttons,
-                is_repeat=is_redo_run
-            )
-
-            start_time = time.time()
-            pressed_button = None
-            while (time.time() - start_time) * 1000 < 10000:
-                if stop_requested:
-                    return
-                if arduino.in_waiting:
-                    line = arduino.readline().decode('utf-8').strip()
-                    if line.startswith("PRESSED"):
-                        pressed_button = int(line.split()[1])
-                        log_event(
-                            event_type="button_pressed",
-                            cond_name=cond_name,
-                            trial_num=trial_num,
-                            trial_type=pattern,
-                            target_button=blue_button,
-                            pressed_button=pressed_button,
-                            active_buttons=active_buttons,
-                            is_repeat=is_redo_run
-                        )
-                        break
-                time.sleep(0.01)
-
-            send_arduino("ALL_OFF")
-            time.sleep(3)
-            last_blue = blue_button
-
-        # ---------- ONLY_RED ----------
         elif pattern == "ONLY_RED":
             options = [i for i in range(NUM_BUTTONS) if i != last_only_red]
-            red_button = random.choice(options)
-            blue_buttons = [i for i in range(NUM_BUTTONS) if i != red_button]
-            active_buttons = blue_buttons + [red_button]
+            target_button = random.choice(options)
+            active_buttons = [i for i in range(NUM_BUTTONS) if i != target_button] + [target_button]
+            arduino_cmd = f"ONLY_RED {','.join(map(str, active_buttons))}"
 
-            update_status(cond_name, trial_num, pattern, active_buttons, target_button=red_button)
-            send_arduino(f"ONLY_RED {','.join(map(str, active_buttons))}")
+        # ---------- Light up buttons ----------
+        update_status(cond_name, trial_num, pattern, active_buttons, target_button=target_button)
+        send_arduino(arduino_cmd)
 
-            log_event(
-                event_type="button_lit",
-                cond_name=cond_name,
-                trial_num=trial_num,
-                trial_type=pattern,
-                target_button=red_button,
-                pressed_button=None,
-                active_buttons=active_buttons,
-                is_repeat=is_redo_run
-            )
+        log_event(
+            event_type="button_lit",
+            cond_name=cond_name,
+            trial_num=trial_num,
+            trial_type=pattern,
+            target_button=target_button,
+            pressed_button=None,
+            active_buttons=active_buttons,
+            is_repeat=is_redo_run
+        )
 
-            start_time = time.time()
-            pressed_button = None
-            while (time.time() - start_time) * 1000 < 10000:
-                if stop_requested:
-                    return
-                if arduino.in_waiting:
-                    line = arduino.readline().decode('utf-8').strip()
-                    if line.startswith("PRESSED"):
-                        pressed_button = int(line.split()[1])
-                        log_event(
-                            event_type="button_pressed",
-                            cond_name=cond_name,
-                            trial_num=trial_num,
-                            trial_type=pattern,
-                            target_button=red_button,
-                            pressed_button=pressed_button,
-                            active_buttons=active_buttons,
-                            is_repeat=is_redo_run
-                        )
-                        break
-                time.sleep(0.01)
+        # ---------- Wait for press OR 10s timeout ----------
+        start_time = time.time()
+        pressed_button = None
+        while (time.time() - start_time) < 10.0:
+            if stop_requested:
+                return
+            if arduino.in_waiting > 0:
+                line = arduino.readline().decode('utf-8').strip()
+                if line.startswith("PRESSED"):
+                    pressed_button = int(line.split()[1])
+                    log_event(
+                        event_type="button_pressed",
+                        cond_name=cond_name,
+                        trial_num=trial_num,
+                        trial_type=pattern,
+                        target_button=target_button,
+                        pressed_button=pressed_button,
+                        active_buttons=active_buttons,
+                        is_repeat=is_redo_run
+                    )
+                    break  # Exit immediately on any press
+            time.sleep(0.005)
 
-            send_arduino("ALL_OFF")
-            time.sleep(3)
-            last_only_red = red_button
+        # ---------- Turn off lights, then 3s pause ----------
+        send_arduino("ALL_OFF")
+        time.sleep(3)
+
+        # ---------- Track last buttons to avoid repeats ----------
+        if pattern in ("GO_BLUE", "ONLY_BLUE"):
+            last_blue = target_button
+        elif pattern == "ONLY_RED":
+            last_only_red = target_button
 
     # After all trials, update history
     current_run = condition_history[cond_name][-1]
@@ -611,8 +497,6 @@ def start_experiment():
     override_var.set(condition_names[0])
 
     redo_btn.config(state="normal")
-
-
 
     # Run first condition
     run_current_condition()
@@ -701,8 +585,6 @@ def run_current_condition():
     next_btn.config(state="normal")
 
 
-
-
 def next_condition():
     """
     Plays the next random condition from remaining_conditions.
@@ -711,7 +593,7 @@ def next_condition():
     global override_condition_name, is_manual_selection, is_redo_run
 
     log_gui_event("next_condition_clicked")
-    
+
     override_condition_name = None  # ensure no manual override
     is_manual_selection = False
     is_redo_run = False
@@ -795,6 +677,7 @@ stop_btn.config(command=stop_experiment)
 # =====================================================
 condition_dropdown.bind("<<ComboboxSelected>>", select_override)
 redo_btn.config(command=redo_current_condition)
+
 # =====================================================
 #                RUN GUI MAIN LOOP
 # =====================================================
