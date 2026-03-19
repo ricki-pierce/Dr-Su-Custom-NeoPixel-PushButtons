@@ -9,6 +9,7 @@
   - Lights LEDs according to the current trial pattern (Go-Blue, Stop-Red, Only-Blue, Only-Red).
   - Detects button presses and reports them back to Python.
   - When a button is pressed during an active trial, all LEDs turn off immediately.
+  - Debounce added to prevent electrical noise from triggering false presses.
 
   CONNECTIONS:
   Buttons: Digital pins 2, 3, 4, 5 (wired to GND, using INPUT_PULLUP)
@@ -18,13 +19,12 @@
 #include <Adafruit_NeoPixel.h>
 
 // ----- CONFIGURATION -----
-#define NUM_BUTTONS 4  // Number of buttons and NeoPixels
+#define NUM_BUTTONS 4
+#define DEBOUNCE_MS 50  // Milliseconds a button must be held LOW to count as a real press
 
-// Assign button and LED pins
 const uint8_t buttonPins[NUM_BUTTONS] = {2, 3, 4, 5};
 const uint8_t ledPins[NUM_BUTTONS] = {6, 7, 8, 9};
 
-// Create 4 individual NeoPixel objects (one per button)
 Adafruit_NeoPixel leds[NUM_BUTTONS] = {
   Adafruit_NeoPixel(1, ledPins[0], NEO_GRB + NEO_KHZ800),
   Adafruit_NeoPixel(1, ledPins[1], NEO_GRB + NEO_KHZ800),
@@ -32,45 +32,40 @@ Adafruit_NeoPixel leds[NUM_BUTTONS] = {
   Adafruit_NeoPixel(1, ledPins[3], NEO_GRB + NEO_KHZ800)
 };
 
-// Track LED color state for each button
-// -1 = off, 0 = red, 1 = blue
+// Track LED color state: -1 = off, 0 = red, 1 = blue
 int activeColor[NUM_BUTTONS] = {-1, -1, -1, -1};
 
-// Track if a button is currently pressed (for debounce)
+// Debounce tracking per button
 bool buttonPressed[NUM_BUTTONS] = {false, false, false, false};
+unsigned long pressStartTime[NUM_BUTTONS] = {0, 0, 0, 0};
+bool buttonArmed[NUM_BUTTONS] = {false, false, false, false};  // True when LOW first detected
 
 // ----- SETUP -----
 void setup() {
-  Serial.begin(115200);  // Match baud rate with Python script
+  Serial.begin(115200);
 
-  // Initialize all buttons and LEDs
   for (int i = 0; i < NUM_BUTTONS; i++) {
-    pinMode(buttonPins[i], INPUT_PULLUP); // Buttons to GND with internal pullups
-    leds[i].begin();                      // Initialize each NeoPixel
-    leds[i].show();                       // Turn LEDs off
+    pinMode(buttonPins[i], INPUT_PULLUP);
+    leds[i].begin();
+    leds[i].show();
   }
 }
 
-// Utility function to build RGB color
 uint32_t colorRGB(uint8_t r, uint8_t g, uint8_t b) {
   return leds[0].Color(r, g, b);
 }
 
-// Turn off all LEDs
 void clearAll() {
   for (int i = 0; i < NUM_BUTTONS; i++) {
-    leds[i].setPixelColor(0, 0);  // Off
+    leds[i].setPixelColor(0, 0);
     leds[i].show();
     activeColor[i] = -1;
   }
 }
 
-// Set one LED to a specific color and record its active color state
 void setLED(int index, uint32_t color) {
   leds[index].setPixelColor(0, color);
   leds[index].show();
-
-  // Track color: 0 = red, 1 = blue
   activeColor[index] = (color == colorRGB(255, 0, 0)) ? 0 : 1;
 }
 
@@ -84,110 +79,89 @@ void loop() {
     String line = Serial.readStringUntil('\n');
     line.trim();
 
-    // ---- Go-Blue pattern ----
-    // Command format: "GO_BLUE X"  (X = button index)
     if (line.startsWith("GO_BLUE")) {
       int idx = line.substring(8).toInt();
       clearAll();
-      setLED(idx, colorRGB(0, 0, 255)); // Blue target
+      setLED(idx, colorRGB(0, 0, 255));
     }
 
-    // ---- Stop-Red pattern ----
-    // Command format: "STOP_RED X"
     else if (line.startsWith("STOP_RED")) {
       int idx = line.substring(9).toInt();
       clearAll();
-      setLED(idx, colorRGB(255, 0, 0)); // Red target
+      setLED(idx, colorRGB(255, 0, 0));
     }
 
-    // ---- Only-Blue pattern ----
-    // Command format: "ONLY_BLUE a,b,c,d"
-    // (Last number = target blue, others = red)
     else if (line.startsWith("ONLY_BLUE")) {
       clearAll();
-
       int nums[NUM_BUTTONS];
       int start = 10;
-
-      // Parse comma-separated LED indices from command
       for (int i = 0; i < NUM_BUTTONS; i++) {
         int end = line.indexOf(',', start);
         if (end == -1) end = line.length();
         nums[i] = line.substring(start, end).toInt();
         start = end + 1;
       }
-
-      // Light up LEDs: last one blue, others red
       for (int i = 0; i < NUM_BUTTONS; i++) {
         if (i == NUM_BUTTONS - 1)
-          setLED(nums[i], colorRGB(0, 0, 255)); // Target blue
+          setLED(nums[i], colorRGB(0, 0, 255));
         else
-          setLED(nums[i], colorRGB(255, 0, 0)); // Distractor red
+          setLED(nums[i], colorRGB(255, 0, 0));
       }
     }
 
-    // ---- Only-Red pattern ----
-    // Command format: "ONLY_RED a,b,c,d"
-    // (Last number = target red, others = blue)
     else if (line.startsWith("ONLY_RED")) {
       clearAll();
-
       int nums[NUM_BUTTONS];
       int start = 9;
-
-      // Parse comma-separated LED indices from command
       for (int i = 0; i < NUM_BUTTONS; i++) {
         int end = line.indexOf(',', start);
         if (end == -1) end = line.length();
         nums[i] = line.substring(start, end).toInt();
         start = end + 1;
       }
-
-      // Light up LEDs: last one red, others blue
       for (int i = 0; i < NUM_BUTTONS; i++) {
         if (i == NUM_BUTTONS - 1)
-          setLED(nums[i], colorRGB(255, 0, 0)); // Target red
+          setLED(nums[i], colorRGB(255, 0, 0));
         else
-          setLED(nums[i], colorRGB(0, 0, 255)); // Distractor blue
+          setLED(nums[i], colorRGB(0, 0, 255));
       }
     }
 
-    // ---- Clear all LEDs ----
-    else if (line == "CLEAR") {
+    else if (line == "ALL_OFF" || line == "CLEAR") {
       clearAll();
     }
   }
 
   // ===============================
-  // Monitor button presses
+  // Monitor button presses (with debounce)
   // ===============================
+  unsigned long now = millis();
+
   for (int i = 0; i < NUM_BUTTONS; i++) {
     int state = digitalRead(buttonPins[i]);
 
-    // Button pressed (active LOW)
-    if (state == LOW && !buttonPressed[i]) {
-      buttonPressed[i] = true;
+    if (state == LOW) {
+      if (!buttonArmed[i]) {
+        // First time we see this button go LOW — start the debounce timer
+        buttonArmed[i] = true;
+        pressStartTime[i] = now;
+      } else if (!buttonPressed[i] && (now - pressStartTime[i]) >= DEBOUNCE_MS) {
+        // Button has been held LOW for the full debounce period — it's a real press
+        buttonPressed[i] = true;
 
-      // Send press event back to Python
-      Serial.print("PRESSED ");
-      Serial.println(i);
+        Serial.print("PRESSED ");
+        Serial.println(i);
 
-      // If any LED is active, clear all immediately
-      bool anyActive = false;
-      for (int j = 0; j < NUM_BUTTONS; j++) {
-        if (activeColor[j] != -1) {
-          anyActive = true;
-          break;
+        // Turn off all LEDs immediately on confirmed press
+        bool anyActive = false;
+        for (int j = 0; j < NUM_BUTTONS; j++) {
+          if (activeColor[j] != -1) { anyActive = true; break; }
         }
+        if (anyActive) clearAll();
       }
-
-      if (anyActive) {
-        clearAll(); // Turn off all LEDs right away
-      }
-    }
-
-    // Button released — reset pressed state
-    if (state == HIGH) {
+    } else {
+      // Button released — reset everything for this button
+      buttonArmed[i] = false;
       buttonPressed[i] = false;
     }
   }
