@@ -83,12 +83,18 @@ void loop() {
       int idx = line.substring(8).toInt();
       clearAll();
       setLED(idx, colorRGB(0, 0, 255));
+      setLED(idx, colorRGB(0, 0, 255));
+      Serial.print("LIT ");
+      Serial.println(idx);
     }
 
     else if (line.startsWith("STOP_RED")) {
       int idx = line.substring(9).toInt();
       clearAll();
       setLED(idx, colorRGB(255, 0, 0));
+      setLED(idx, colorRGB(255, 0, 0));
+      Serial.print("LIT ");
+      Serial.println(idx);
     }
 
     else if (line.startsWith("ONLY_BLUE")) {
@@ -106,6 +112,8 @@ void loop() {
           setLED(nums[i], colorRGB(0, 0, 255));
         else
           setLED(nums[i], colorRGB(255, 0, 0));
+        Serial.print("LIT ");
+        Serial.println(nums[i]);
       }
     }
 
@@ -124,6 +132,8 @@ void loop() {
           setLED(nums[i], colorRGB(255, 0, 0));
         else
           setLED(nums[i], colorRGB(0, 0, 255));
+        Serial.print("LIT ");
+        Serial.println(nums[i]);
       }
     }
 
