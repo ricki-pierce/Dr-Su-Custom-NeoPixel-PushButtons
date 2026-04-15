@@ -54,21 +54,32 @@ _lsl_info = StreamInfo(
     type='Markers',
     channel_count=1,
     channel_format='int32',
-    source_id='ButtonController'
+    source_id='fNIRS'
 )
 lsl_outlet = StreamOutlet(_lsl_info)  # <<< LSL
 print("LSL Trigger stream created — start recording in Aurora before beginning task")
+
+
+# BrainVision LSL marker stream
+_bv_info = StreamInfo(
+    name='BV_Markers',       # Can be any name — just note it for BrainVision
+    type='Markers',
+    channel_count=1,
+    channel_format='int32',
+    source_id='BrainVision'
+)
+bv_outlet = StreamOutlet(_bv_info)
+print("BrainVision LSL Marker stream created")
 
 # Marker codes
 MARKER_BUTTON_COMMANDED  = 1   # <<< LSL — button told to light up
 MARKER_BUTTON_LIT        = 2   # <<< LSL — button confirmed lit by hardware
 MARKER_BUTTON_PRESSED    = 4   # <<< LSL — button physically pressed
 
-def send_marker(marker_value, label=""):  # <<< LSL
-    """Send a single integer marker to Aurora via LSL."""
-    lsl_outlet.push_sample([marker_value])
+def send_marker(marker_value, label=""):
+    lsl_outlet.push_sample([marker_value])       # Aurora
+    bv_outlet.push_sample([marker_value])        # BrainVision
     print(f"LSL Marker sent: {marker_value} ({label})")
-
 
 # =====================================================
 def sync_windows_time():
