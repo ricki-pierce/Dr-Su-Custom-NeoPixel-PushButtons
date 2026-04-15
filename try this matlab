@@ -1,0 +1,167 @@
+%% ============================================================
+%  STEP 5: Load raw EEG signal from XDF
+%% ============================================================
+eeg_stream_idx = [];
+for i = 1:length(streams)
+    if isfield(streams{i}.info, 'channel_count') && ...
+       str2double(streams{i}.info.channel_count) > 4
+        % Heuristic: the EEG stream has many channels
+        eeg_stream_idx = i;
+        break
+    end
+end
+
+eeg_signal     = streams{eeg_stream_idx}.time_series;   % channels x samples
+eeg_signal_t   = streams{eeg_stream_idx}.time_stamps;   % 1 x samples, LSL time
+
+% Find Fp1 channel index — check your XDF for the exact channel order
+% Typical BrainVision order: 1=Fp1, 2=Fp2, etc.  Adjust if needed.
+fp1_idx = 1;   % <-- change if Fp1 is not channel 1
+fp1_uV  = eeg_signal(fp1_idx, :);
+
+% Convert EEG signal timestamps to posixtime using the same clock offset
+eeg_signal_posix = eeg_signal_t + clock_offset;   % now in posixtime, same epoch as fNIRS
+
+%% ============================================================
+%  STEP 6: Load fNIRS HbO/HbR from .nirs file
+%% ============================================================
+nirs = load('C:\Users\rpier12\Documents\NIRx\Data\2026-04-09\2026-04-09_003\2026-04-09_003.nirs', ...
+            '-mat');
+
+% .nirs variables: d (raw), t (time vector in seconds from start),
+%                  procResult.dc (processed HbO/HbR/HbT, channels x time x chromophore)
+% If Homer2/Homer3 was used, HbO is procResult.dc(:,:,1)
+
+% Get the fNIRS recording start time from the .hdr file
+% NIRx .hdr contains: Date and Time fields
+hdr_fid  = fopen('C:\Users\rpier12\Documents\NIRx\Data\2026-04-09\2026-04-09_003\2026-04-09_003.hdr');
+hdr_raw  = textscan(hdr_fid, '%s', 'Delimiter', '\n'); fclose(hdr_fid);
+hdr_lines = hdr_raw{1};
+
+date_str = ''; time_str = '';
+for i = 1:length(hdr_lines)
+    if startsWith(hdr_lines{i}, 'Date=')
+        date_str = strtrim(extractAfter(hdr_lines{i}, 'Date='));
+    end
+    if startsWith(hdr_lines{i}, 'Time=')
+        time_str = strtrim(extractAfter(hdr_lines{i}, 'Time='));
+    end
+end
+
+% Parse recording start as posixtime
+fnirs_start_dt   = datetime([date_str ' ' time_str], ...
+                             'InputFormat', 'dd-MM-yyyy HH:mm:ss', ...
+                             'TimeZone', 'local');
+fnirs_start_posix = posixtime(fnirs_start_dt);
+
+% Build absolute posixtime axis for fNIRS
+fnirs_t_posix = fnirs_start_posix + nirs.t(:)';   % 1 x samples
+
+% Pull out S11-D11 channel
+% You need to know which column in nirs.procResult.dc is S11-D11
+% Check nirs.SD.MeasList — rows are [source detector wavelength type]
+% For HbO (type=1): find row where source=11, detector=11
+if isfield(nirs, 'procResult') && isfield(nirs.procResult, 'dc')
+    hbo_all = squeeze(nirs.procResult.dc(:,:,1));  % channels x time, HbO in µM
+    hbr_all = squeeze(nirs.procResult.dc(:,:,2));  % HbR
+    
+    % Find S11-D11 index in measurement list
+    ml = nirs.SD.MeasList;
+    ch_idx = find(ml(:,1)==11 & ml(:,2)==11 & ml(:,4)==1, 1);
+    
+    if isempty(ch_idx)
+        error('S11-D11 not found in MeasList — check your channel numbering')
+    end
+    
+    s11d11_hbo = hbo_all(ch_idx, :);   % µM, 1 x nSamples
+else
+    error('No procResult.dc found — run Homer2/Homer3 preprocessing first (hmrBandpassFilt, hmrOD2Conc, etc.)')
+end
+
+%% ============================================================
+%  STEP 7: Build a common time axis and align both signals
+%% ============================================================
+% Use the EEG signal's time range (or whatever overlap exists)
+t_start = max(eeg_signal_posix(1),   fnirs_t_posix(1));
+t_end   = min(eeg_signal_posix(end), fnirs_t_posix(end));
+
+% Common axis at EEG sampling rate (typically 500 or 1000 Hz)
+eeg_fs       = 1 / median(diff(eeg_signal_t));
+t_common     = t_start : 1/eeg_fs : t_end;    % posixtime, high-res
+
+% Interpolate fNIRS onto common axis (fNIRS is ~10 Hz, EEG ~500 Hz)
+% interp1 handles upsampling gracefully; use 'linear' for speed
+s11d11_aligned = interp1(fnirs_t_posix, s11d11_hbo, t_common, 'linear', NaN);
+
+% EEG: interpolate (or just index — it's already high-res)
+fp1_aligned = interp1(eeg_signal_posix, fp1_uV, t_common, 'linear', NaN);
+
+% Relative time in seconds from recording start (easier to read on x-axis)
+t_rel = t_common - t_start;
+
+%% ============================================================
+%  STEP 8: Get marker times on the common axis
+%% ============================================================
+% Use aligned EEG marker posix times (already computed earlier)
+marker_posix_aligned = eeg_times + clock_offset;   % same posixtime as t_common
+marker_t_rel = marker_posix_aligned - t_start;     % relative seconds
+
+%% ============================================================
+%  STEP 9: Plot — two synced subplots with shared x-axis
+%% ============================================================
+marker_colors = containers.Map([1 2 4], ...
+    {[0.2 0.6 1.0], [0.1 0.8 0.3], [1.0 0.4 0.1]});   % blue=1, green=2, orange=4
+marker_labels = containers.Map([1 2 4], ...
+    {'Button commanded (1)', 'Button lit (2)', 'Button pressed (4)'});
+
+fig = figure('Name', 'EEG–fNIRS Synchronized', 'Color', 'w', 'Position', [100 100 1400 700]);
+
+% --- Top panel: EEG Fp1 ---
+ax1 = subplot(2, 1, 1);
+plot(t_rel, fp1_aligned, 'Color', [0.15 0.45 0.85], 'LineWidth', 0.8);
+ylabel('Amplitude (µV)');
+title('EEG — Fp1');
+hold on; grid on; box off;
+ax1.XTickLabel = {};   % share x-axis, hide labels on top panel
+
+% Add marker lines to EEG panel
+for k = 1:length(marker_t_rel)
+    mt = marker_t_rel(k);
+    mv = eeg_markers(k);
+    if mt >= t_rel(1) && mt <= t_rel(end)
+        xline(mt, '--', 'Color', marker_colors(mv), 'LineWidth', 1.2, ...
+              'HandleVisibility', 'off');
+    end
+end
+
+% Legend entries (one per marker type)
+for mv = [1 2 4]
+    xline(NaN, '--', 'Color', marker_colors(mv), 'LineWidth', 1.5, ...
+          'DisplayName', marker_labels(mv));
+end
+legend('Location', 'northeast', 'FontSize', 9);
+
+% --- Bottom panel: fNIRS S11-D11 HbO ---
+ax2 = subplot(2, 1, 2);
+plot(t_rel, s11d11_aligned * 1e6, 'Color', [0.85 0.25 0.1], 'LineWidth', 1.0);
+% Note: Homer outputs HbO in molar (M), multiply by 1e6 for µM
+ylabel('HbO concentration (µM)');
+xlabel('Time from recording start (s)');
+title('fNIRS — S11-D11 HbO');
+hold on; grid on; box off;
+
+for k = 1:length(marker_t_rel)
+    mt = marker_t_rel(k);
+    mv = eeg_markers(k);
+    if mt >= t_rel(1) && mt <= t_rel(end)
+        xline(mt, '--', 'Color', marker_colors(mv), 'LineWidth', 1.2, ...
+              'HandleVisibility', 'off');
+    end
+end
+
+% Link axes so zooming/panning one panel moves the other
+linkaxes([ax1 ax2], 'x');
+
+% Tighten layout
+set([ax1 ax2], 'FontSize', 11, 'TickDir', 'out');
+fig.Position(3) = 1400;
