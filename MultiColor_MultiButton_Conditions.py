@@ -614,12 +614,6 @@ def run_trials(trials, cond_name):
         # ---------- Turn off lights ----------
         send_arduino("ALL_OFF")
 
-        # ---------- Look-up beep after last trial (before final pause) ----------
-        is_last_trial = (trial_num == len(trials) - 1)
-        if is_last_trial:
-            winsound.Beep(500, 500)
-            print("Look-up beep played (end of last trial)")
-
         # ---------- Randomized ITI: 2.5–3.5 seconds ----------
         iti = random.uniform(2.5, 3.5)
         time.sleep(iti)
