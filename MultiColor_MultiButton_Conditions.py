@@ -28,6 +28,7 @@ DEPENDENCIES:
 """
 
 import os
+import sys
 import serial
 import time
 import random
@@ -40,6 +41,38 @@ from datetime import datetime
 from ctypes import cdll, c_float, sizeof
 import subprocess
 from pylsl import StreamInfo, StreamOutlet
+
+
+# =====================================================
+#                TERMINAL LOG CAPTURE
+# =====================================================
+
+class _TeeLogger:
+    """Writes to both the real stdout and an internal list for later saving."""
+    def __init__(self, original_stdout):
+        self._original = original_stdout
+        self._lines    = []
+        self._lock     = threading.Lock()
+
+    def write(self, msg):
+        self._original.write(msg)
+        self._original.flush()
+        if msg.strip():
+            with self._lock:
+                self._lines.append({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                    "message":   msg.rstrip("\n")
+                })
+
+    def flush(self):
+        self._original.flush()
+
+    def get_lines(self):
+        with self._lock:
+            return list(self._lines)
+
+_tee_logger = _TeeLogger(sys.stdout)
+sys.stdout  = _tee_logger
 
 
 # =====================================================
@@ -89,23 +122,16 @@ def shutdown_force_plate():
 #         FORCE PLATE RECORDING — PER CONDITION
 # =====================================================
 
-# These are shared between the recording thread and the trial logic.
-# The trial logic writes marker info here; the recording thread reads it.
 _fp_marker_lock   = threading.Lock()
-_fp_current_marker_code  = 0    # numeric: 0, 1, 2, or 4
-_fp_current_marker_label = ""   # text label
+_fp_current_marker_code  = 0
+_fp_current_marker_label = ""
 
-_fp_stop_event = threading.Event()   # set() to stop recording
-_fp_thread     = None                # reference to active recording thread
-_fp_data_rows  = []                  # accumulated rows for current condition
+_fp_stop_event = threading.Event()
+_fp_thread     = None
+_fp_data_rows  = []
 
 
 def set_fp_marker(code, label):
-    """
-    Call this from trial logic whenever a marker event happens.
-    The recording thread will stamp the NEXT sample with this marker.
-    After one sample the marker resets to 0 / empty automatically.
-    """
     global _fp_current_marker_code, _fp_current_marker_label
     with _fp_marker_lock:
         _fp_current_marker_code  = code
@@ -113,12 +139,6 @@ def set_fp_marker(code, label):
 
 
 def _fp_recording_loop():
-    """
-    Runs in a background thread.
-    Collects force plate data continuously until _fp_stop_event is set.
-    Each row: counter, Fx, Fy, Fz, Mx, My, Mz, trigger_state,
-              marker_code, marker_label
-    """
     global _fp_data_rows, _fp_current_marker_code, _fp_current_marker_label
 
     _fp_data_rows = []
@@ -133,7 +153,6 @@ def _fp_recording_loop():
     while not _fp_stop_event.is_set():
         res = amti.fmDLLGetTheFloatDataLBVStyle(buf, sizeof(buf))
         if res != 0:
-            # Grab and immediately reset marker so it only stamps once
             with _fp_marker_lock:
                 stamp_code  = _fp_current_marker_code
                 stamp_label = _fp_current_marker_label
@@ -142,8 +161,6 @@ def _fp_recording_loop():
 
             for a in range(0, BUF_SIZE, SAMPLE_SIZE):
                 sample = list(buf[a:(a + SAMPLE_SIZE)])
-                # Only stamp the first sample of this block with the marker
-                # (subsequent samples in this block get 0 / empty)
                 _fp_data_rows.append(sample + [stamp_code, stamp_label])
                 stamp_code  = 0
                 stamp_label = ""
@@ -159,7 +176,6 @@ def _fp_recording_loop():
 
 
 def start_fp_recording():
-    """Start the background force plate recording thread."""
     global _fp_thread
     _fp_stop_event.clear()
     _fp_thread = threading.Thread(target=_fp_recording_loop, daemon=True)
@@ -167,18 +183,12 @@ def start_fp_recording():
 
 
 def stop_fp_recording():
-    """Signal the recording thread to stop and wait for it to finish."""
     _fp_stop_event.set()
     if _fp_thread is not None:
         _fp_thread.join(timeout=5)
 
 
 def save_fp_data(condition_name, order_number, is_repeat):
-    """
-    Save accumulated force plate data to a .txt file.
-    Filename format:  "No Shift - Feet Apart (1).txt"
-                  or  "No Shift - Feet Apart (Repeat).txt"
-    """
     if is_repeat:
         suffix = "Repeat"
     else:
@@ -189,14 +199,12 @@ def save_fp_data(condition_name, order_number, is_repeat):
     full_path = os.path.join(FORCE_PLATE_SAVE_FOLDER, filename)
 
     with open(full_path, 'wt') as fp:
-        # Header row
         fp.write(
             'counter\tFx (N)\tFy (N)\tFz (N)\t'
             'Mx (Nm)\tMy (Nm)\tMz (Nm)\t'
             'trigger state\tmarker\tmarker_label\n'
         )
         for row in _fp_data_rows:
-            # row = [counter, Fx, Fy, Fz, Mx, My, Mz, trigger, marker_code, marker_label]
             numeric_part = row[:8]
             marker_code  = row[8]
             marker_label = row[9]
@@ -239,7 +247,7 @@ def send_marker(marker_value, label=""):
     """Send LSL marker to Aurora + BrainVision AND stamp force plate file."""
     lsl_outlet.push_sample([marker_value])
     bv_outlet.push_sample([marker_value])
-    set_fp_marker(marker_value, label)    # <-- force plate marker stamp
+    set_fp_marker(marker_value, label)
     print(f"LSL Marker sent: {marker_value} ({label})")
 
 
@@ -314,7 +322,6 @@ current_condition_name = None
 condition_history     = {}
 event_log             = []
 
-# Counter for how many conditions have been completed (non-repeat runs)
 condition_order_counter = 0
 
 
@@ -322,16 +329,31 @@ condition_order_counter = 0
 #                HELPER FUNCTIONS
 # =====================================================
 
+PATTERN_INSTRUCTIONS = {
+    "GO_BLUE":   "Go-Blue: Press the button when a single blue light appears.",
+    "STOP_RED":  "Stop-Red: Do not press when a red light appears.",
+    "ONLY_BLUE": "Only-Blue: When three red lights and one blue light appear, press only the blue button.",
+    "ONLY_RED":  "Only-Red: When three blue lights and one red light appear, press only the red button.",
+}
+
 def show_instructions(cond_name, trials, is_repeat=False):
     trial_names  = [t["pattern"] for t in trials]
     display_name = f"{cond_name} (REPEAT)" if is_repeat else cond_name
+
+    # Build deduplicated instruction lines for patterns present in this condition
+    seen_patterns = []
+    for p in trial_names:
+        if p not in seen_patterns:
+            seen_patterns.append(p)
+    instruction_lines = "\n".join(PATTERN_INSTRUCTIONS[p] for p in seen_patterns)
+
     instr_text   = (
         f"Condition: {display_name}\n\nTrials:\n" +
         "\n".join(trial_names) +
+        "\n\n" + instruction_lines +
         "\n\nAfter instructing participant, press SPACEBAR to begin "
         "10-second fixation cross and trials.\n\n"
-        "Don't forget to manually Start/Stop the Aurora fNIRS recording.\n"
-        "Markers will be placed in fNIRS data corresponding to buttons being lit and pressed.\n\n"
+        "Markers will be placed in fNIRS data, EEG, and button log corresponding to buttons being lit and pressed.\n\n"
         "NOTE: Force plate recording will START when you press SPACEBAR."
     )
 
@@ -349,6 +371,12 @@ def show_instructions(cond_name, trials, is_repeat=False):
         instr_window.destroy()
         # ---- START FORCE PLATE RECORDING HERE ----
         start_fp_recording()
+        # ---- LOOK-DOWN BEEP at 8.5 seconds into fixation ----
+        def _delayed_lookdown_beep():
+            time.sleep(8.5)
+            winsound.Beep(500, 500)
+            print("Look-down beep played (8.5s after spacebar)")
+        threading.Thread(target=_delayed_lookdown_beep, daemon=True).start()
 
     instr_window.bind("<space>", on_space)
     instr_window.grab_set()
@@ -487,7 +515,8 @@ def log_gui_event(event_type, extra=None):
 #                TRIAL PRESENTATION LOGIC
 # =====================================================
 
-NUM_BUTTONS = 4
+NUM_BUTTONS  = 4
+TOTAL_TRIALS = 10
 
 def run_trials(trials, cond_name):
     last_blue     = None
@@ -582,9 +611,18 @@ def run_trials(trials, cond_name):
                     break
             time.sleep(0.005)
 
-        # ---------- Turn off lights, then 3s pause ----------
+        # ---------- Turn off lights ----------
         send_arduino("ALL_OFF")
-        time.sleep(3)
+
+        # ---------- Look-up beep after last trial (before final pause) ----------
+        is_last_trial = (trial_num == len(trials) - 1)
+        if is_last_trial:
+            winsound.Beep(500, 500)
+            print("Look-up beep played (end of last trial)")
+
+        # ---------- Randomized ITI: 2.5–3.5 seconds ----------
+        iti = random.uniform(2.5, 3.5)
+        time.sleep(iti)
 
         if pattern in ("GO_BLUE", "ONLY_BLUE"):
             last_blue = target_button
@@ -686,7 +724,6 @@ def run_current_condition():
     current_condition_name = cond_name
 
     # ---------------- SHOW INSTRUCTIONS + SPACEBAR ----------------
-    # Force plate recording starts inside show_instructions when spacebar is pressed
     show_instructions(cond_name, trials, is_redo_run)
 
     # ---------------- 10 SECOND FIXATION ----------------
@@ -779,6 +816,26 @@ history_frame.place(relx=0.0, rely=0.6, relwidth=1.0, relheight=0.35)
 #                SAVE LOG ON EXIT
 # =====================================================
 
+def save_terminal_log():
+    """Save all captured terminal (stdout) messages to an Excel file."""
+    try:
+        lines = _tee_logger.get_lines()
+        if lines:
+            df = pd.DataFrame(lines)
+            save_folder = r"C:\Users\rpier12\Python Results"
+            os.makedirs(save_folder, exist_ok=True)
+            file_path = os.path.join(
+                save_folder,
+                f"terminal_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            )
+            df.to_excel(file_path, index=False)
+            _tee_logger._original.write(f"Terminal log saved to {file_path}\n")
+        else:
+            _tee_logger._original.write("No terminal messages to save.\n")
+    except Exception as e:
+        _tee_logger._original.write(f"Error saving terminal log: {e}\n")
+
+
 def save_log_on_exit():
     global stop_requested
     stop_requested = True
@@ -811,10 +868,13 @@ def save_log_on_exit():
     except Exception as e:
         print("Error saving Excel log:", e)
 
+    # ---- SAVE TERMINAL LOG LAST (captures everything above) ----
+    save_terminal_log()
+
     try:
         arduino.close()
     except Exception as e:
-        print("Error closing Arduino serial:", e)
+        _tee_logger._original.write(f"Error closing Arduino serial: {e}\n")
 
     shutdown_force_plate()
     root.destroy()
