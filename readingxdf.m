@@ -1,97 +1,191 @@
-streams = load_xdf('C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf');
+#i THINK all these codes are fine as is
 
-% Print all streams so you know what's there
-for i = 1:length(streams)
-    fprintf('Stream %d: Name = %s | Type = %s\n', i, streams{i}.info.name, streams{i}.info.type)
-end
 
-% Automatically find all streams containing markers 1, 2, or 4
-for i = 1:length(streams)
-    values = streams{i}.time_series;
-    timestamps = streams{i}.time_stamps;
+# #this script lists out all the streams in teh file and includes how many data samples are in the file. once you identify the right ones, ID teh streams appropriately in 
+# lines 20 nd 21 to get the time stamps of where the events occur in the file.
+# import pyxdf
+
+# streams, header = pyxdf.load_xdf(r'C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf')
+# # See what streams are in the file
+# for i, stream in enumerate(streams):
+#     name = stream['info']['name'][0]
+#     stype = stream['info']['type'][0]
+#     n_channels = stream['info']['channel_count'][0]
+#     srate = stream['info']['nominal_srate'][0]
+#     n_samples = len(stream['time_stamps'])
+#     print(f"Stream {i}: '{name}' | type={stype} | channels={n_channels} | srate={srate}Hz | samples={n_samples}")
+
+# import pyxdf
+# import numpy as np
+
+# streams, header = pyxdf.load_xdf(r'C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf')
+
+# # Grab streams by index
+# eeg_stream    = streams[4]  # LiveAmpSN-055602-0308
+# marker_stream = streams[0]  # NIRStarTriggers
+
+# eeg_times     = eeg_stream['time_stamps']
+# marker_labels = [m[0] for m in marker_stream['time_series']]
+# marker_times  = marker_stream['time_stamps']
+
+# print(f"EEG duration: {eeg_times[-1] - eeg_times[0]:.2f}s  |  {len(eeg_times)} samples")
+# print(f"Found {len(marker_labels)} markers:\n")
+
+# for label, t in zip(marker_labels, marker_times):
+#     idx = np.searchsorted(eeg_times, t)
+#     rel = t - eeg_times[0]
+#     print(f"  [{idx:6d}]  {rel:8.3f}s  →  '{label}'")
+
+#this eeg analysis code tells you for the 80 trials, at what time the light came on, when the button was pressed, diff bw those 2, and if it was a HIT or MISS
+import pyxdf
+import numpy as np
+
+streams, header = pyxdf.load_xdf(r'C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf')
+
+marker_stream = streams[0]
+eeg_stream    = streams[4]
+
+eeg_times    = eeg_stream['time_stamps']
+raw_markers  = marker_stream['time_series']
+marker_times = marker_stream['time_stamps']
+
+# Separate by event code (channel 2)
+light_commanded = []  # code 1
+light_on        = []  # code 2
+button_press    = []  # code 4
+
+for m, t in zip(raw_markers, marker_times):
+    code = int(m[0])
+    idx  = np.searchsorted(eeg_times, t)
+    rel  = t - eeg_times[0]
+    entry = (idx, rel, t)
+    if code == 1:
+        light_commanded.append(entry)
+    elif code == 2:
+        light_on.append(entry)
+    elif code == 4:
+        button_press.append(entry)
+
+print(header['info']['datetime'][0])  # UTC datetime string
+print(f"Light commanded (1): {len(light_commanded)} events")
+print(f"Light on       (2): {len(light_on)} events")
+print(f"Button press   (4): {len(button_press)} events")
+
+print("\n--- Button Presses ---")
+for idx, rel, t in button_press:
+    print(f"  [{idx:6d}]  {rel:8.3f}s")
+
+# Pair each button press with the most recent light_on event before it
+print("Trial | Light On (s) | Button Press (s) | RT (ms) | Status")
+print("-" * 65)
+
+trial = 0
+press_iter = iter(button_press)
+next_press = next(press_iter, None)
+
+for i, (cmd_idx, cmd_rel, cmd_t) in enumerate(light_commanded):
+    # Find the light_on event for this trial
+    # (the first code-2 event at or after this command)
+    on_event = next((e for e in light_on if e[2] >= cmd_t), None)
     
-    % Skip EEG streams (too many channels / values way outside 1-4)
-    if size(values, 1) > 1
-        continue
-    end
+    # Find the button press for this trial
+    # (first code-4 event after light turned on, before next command)
+    next_cmd_t = light_commanded[i+1][2] if i+1 < len(light_commanded) else float('inf')
     
-    commanded = timestamps(values == 1);
-    lit        = timestamps(values == 2);
-    pressed    = timestamps(values == 4);
-    
-    % Only print streams that actually contain at least one of your markers
-    if length(commanded) + length(lit) + length(pressed) > 0
-        fprintf('\n--- Stream %d: %s ---\n', i, streams{i}.info.name)
-        fprintf('Commanded events (1): %d\n', length(commanded))
-        fprintf('Lit events       (2): %d\n', length(lit))
-        fprintf('Pressed events   (4): %d\n', length(pressed))
-        
-        % Print each timestamp and its marker value
-        fprintf('\nFull marker list:\n')
-        for j = 1:length(timestamps)
-            if any(values(j) == [1 2 4])
-                fprintf('  Time: %.4f  |  Marker: %d\n', timestamps(j), values(j))
-            end
-        end
-    end
-end
+    if on_event:
+        press = next((e for e in button_press if on_event[2] <= e[2] < next_cmd_t), None)
+    else:
+        press = None
+
+    if press and on_event:
+        rt_ms = (press[2] - on_event[2]) * 1000
+        print(f"  {i+1:3d} | {on_event[1]:10.3f}s  | {press[1]:14.3f}s  | {rt_ms:6.1f}ms | HIT")
+    else:
+        print(f"  {i+1:3d} | {on_event[1] if on_event else '?':>10}   | {'—':>14}   | {'—':>8} | MISS")
 
 
+actual_srate = len(eeg_times) / (eeg_times[-1] - eeg_times[0])
+print(f"Nominal srate: {eeg_stream['info']['nominal_srate'][0]} Hz")
+print(f"Actual srate:  {actual_srate:.4f} Hz")
 
-% streams = load_xdf('C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf');
-% 
-% 
-% for i = 1:length(streams)
-%     disp(i)
-%     disp(streams{i}.info.name)
-%     disp(streams{i}.info.type)
-% end
-% 
-% timestamps = trigger_stream.time_stamps;
-% values     = trigger_stream.time_series;
-% 
-% unique_vals = unique(values);
-% disp('Unique trigger values found:')
-% disp(unique_vals)
-% 
-% % Count non-zero triggers
-% nonzero = values(values ~= 0);
-% fprintf('Non-zero trigger events: %d\n', length(nonzero))
-% 
-% marker_stream = streams{1};
-% timestamps = marker_stream.time_stamps;
-% values     = marker_stream.time_series;
-% 
-% commanded = timestamps(values == 1);
-% lit        = timestamps(values == 2);
-% pressed    = timestamps(values == 4);
-% 
-% fprintf('Commanded events: %d\n', length(commanded))
-% fprintf('Lit events:       %d\n', length(lit))
-% fprintf('Pressed events:   %d\n', length(pressed))
 
-% streams = load_xdf('C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf');
-% 
-% for i = 1:length(streams)
-%     disp(i)
-%     disp(streams{i}.info.name)
-%     disp(streams{i}.info.type)
-% end
-% 
-% marker_stream = streams{4};
-% 
-% timestamps = marker_stream.time_stamps;
-% values     = marker_stream.time_series;
-% 
-% % Display all markers
-% for i = 1:length(timestamps)
-%     fprintf('Time: %.4f  |  Marker: %s\n', timestamps(i), num2str(values(i)));
-% end
-% 
-% commanded = timestamps(values == 1);   % Button told to light
-% lit        = timestamps(values == 2);   % Button confirmed lit
-% pressed    = timestamps(values == 4);   % Button pressed
-% 
-% fprintf('Commanded events: %d\n', length(commanded))
-% fprintf('Lit events:       %d\n', length(lit))
-% fprintf('Pressed events:   %d\n', length(pressed))
+# #this script lists the streams found in the file and then prints the first 20 marker values from those streams with content
+# import pyxdf
+# import numpy as np
+
+# streams, header = pyxdf.load_xdf(r'C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf')
+
+# print("Streams found in this file:")
+# for i, s in enumerate(streams):
+#     info = s['info']
+#     name = info['name'][0]
+#     stype = info['type'][0] if info['type'][0] is not None else 'None'
+#     n_samples = len(s['time_stamps'])
+#     n_channels = info['channel_count'][0]
+#     print(f"  [{i}] name={name!r}, type={stype!r}, channels={n_channels}, samples={n_samples}")
+
+# # EEG stream: pick by type, skipping None safely
+# eeg_stream = None
+# for s in streams:
+#     stype = s['info']['type'][0]
+#     if stype is not None and stype.lower() == 'eeg':
+#         eeg_stream = s
+#         break
+
+# if eeg_stream is None:
+#     raise RuntimeError("No EEG stream found.")
+
+# print(f"\nUsing EEG stream: {eeg_stream['info']['name'][0]} ({len(eeg_stream['time_stamps'])} samples)")
+
+# # Inspect BOTH candidate marker streams so you can tell which one has your codes
+# for name in ('BV_Markers', 'Trigger'):
+#     for s in streams:
+#         if s['info']['name'][0] == name:
+#             vals = [row[0] for row in s['time_series'][:20]]  # first 20 entries
+#             print(f"\n{name} — first 20 marker values: {vals}")
+
+# #this code tells you how many of each event occurred in the eeg file
+# import pyxdf
+# import numpy as np
+
+# streams, header = pyxdf.load_xdf(r'C:\Users\rpier12\Documents\CurrentStudy\sub-P001\ses-S001\eeg\sub-P001_ses-S001_task-Default_run-001_eeg.xdf')
+
+# eeg_stream = None
+# marker_stream = None
+# for s in streams:
+#     stype = s['info']['type'][0]
+#     name = s['info']['name'][0]
+#     if stype is not None and stype.lower() == 'eeg':
+#         eeg_stream = s
+#     if name == 'Trigger':
+#         marker_stream = s
+
+# if eeg_stream is None or marker_stream is None:
+#     raise RuntimeError("Could not find EEG or Trigger marker stream.")
+
+# eeg_times    = eeg_stream['time_stamps']
+# raw_markers  = marker_stream['time_series']
+# marker_times = marker_stream['time_stamps']
+
+# print(f"Using EEG stream: {eeg_stream['info']['name'][0]} ({len(eeg_times)} samples)")
+# print(f"Using Marker stream: {marker_stream['info']['name'][0]} ({len(marker_times)} samples)")
+
+# light_commanded = []
+# light_on        = []
+# button_press    = []
+
+# for m, t in zip(raw_markers, marker_times):
+#     code = int(m[0])          # <-- was m[1], fixed to m[0]
+#     idx  = np.searchsorted(eeg_times, t)
+#     rel  = t - eeg_times[0]
+#     entry = (idx, rel, t)
+#     if code == 1:
+#         light_commanded.append(entry)
+#     elif code == 2:
+#         light_on.append(entry)
+#     elif code == 4:
+#         button_press.append(entry)
+
+# print(f"Light commanded (1): {len(light_commanded)} events")
+# print(f"Light on       (2): {len(light_on)} events")
+# print(f"Button press   (4): {len(button_press)} events")
