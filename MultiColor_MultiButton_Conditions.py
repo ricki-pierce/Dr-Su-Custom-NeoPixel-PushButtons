@@ -614,6 +614,7 @@ def run_trials(trials, cond_name):
         # ---------- Turn off lights ----------
         send_arduino("ALL_OFF")
 
+
         # ---------- Randomized ITI: 2.5–3.5 seconds ----------
         iti = random.uniform(2.5, 3.5)
         time.sleep(iti)
@@ -681,8 +682,6 @@ def start_experiment():
 
     condition_order_counter = 0
 
-    time.sleep(2)
-    beep()
 
     canonical_conditions  = build_conditions()
     remaining_conditions  = canonical_conditions.copy()
